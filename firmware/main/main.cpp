@@ -24,9 +24,9 @@ void lvgl_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
 {
     const int32_t w = area->x2 - area->x1 + 1;
     const int32_t h = area->y2 - area->y1 + 1;
-    // Untested: LVGL's RGB565 byte order vs. what LovyanGFX expects here
-    // hasn't been checked on hardware. If text renders with scrambled
-    // colors, look at LVGL's color-swap config first.
+    // Display is configured LV_COLOR_FORMAT_RGB565_SWAPPED to match the
+    // byte order pushImage() expects — see the color format comment
+    // where the display is created.
     lcd.pushImage(area->x1, area->y1, w, h, reinterpret_cast<uint16_t*>(px_map));
     lv_display_flush_ready(disp);
 }
@@ -52,6 +52,11 @@ extern "C" void app_main(void)
 
     lv_display_t* disp = lv_display_create(240, 240);
     lv_display_set_flush_cb(disp, lvgl_flush_cb);
+    // LovyanGFX's pushImage() expects SPI-panel byte order, which is
+    // swapped relative to LVGL's plain RGB565. Without this, only pure
+    // black/white survive untouched; every anti-aliased/blended pixel
+    // (i.e. most of any glyph's edges) comes out with a scrambled hue.
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565_SWAPPED);
     lv_display_set_buffers(disp, lvgl_draw_buf, nullptr, sizeof(lvgl_draw_buf),
                             LV_DISPLAY_RENDER_MODE_PARTIAL);
 
