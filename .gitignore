@@ -1,2 +1,10 @@
 .DS_Store
-gravity_timer_project_plan.md
+**/.vscode
+
+# nested local-only repo, never tracked/pushed by the outer repo
+reference/private/
+
+# ESP-IDF build artifacts
+firmware/build/
+firmware/sdkconfig.old
+firmware/managed_components/
