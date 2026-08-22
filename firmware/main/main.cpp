@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -8,11 +9,13 @@
 #include "gpio_pin.hpp"
 #include "i2c_scan.hpp"
 #include "lgfx_config.hpp"
+#include "qmi8658.hpp"
 
 namespace {
 
 constexpr int kLvglTickPeriodMs = 5;
 constexpr int kDrawBufRows = 20;  // partial buffer: 20 rows of the 240-wide panel
+constexpr int64_t kSensorUpdatePeriodUs = 150 * 1000;  // readable, not maxed out
 
 // static: app_main's task exits after returning, and GpioPin's destructor
 // would call gpio_reset_pin() and turn the backlight back off. A static
@@ -35,6 +38,15 @@ void lvgl_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
 void lvgl_tick_cb(void*)
 {
     lv_tick_inc(kLvglTickPeriodMs);
+}
+
+// LVGL's default builtin sprintf doesn't implement %f (it silently drops
+// the conversion and leaves the literal 'f' character), so format floats
+// as fixed-point integers ourselves rather than depend on a float-capable
+// sprintf/libc combination.
+int RoundToFixed(float value, int scale)
+{
+    return static_cast<int>(value * scale + (value >= 0 ? 0.5f : -0.5f));
 }
 
 }  // namespace
@@ -75,13 +87,41 @@ extern "C" void app_main(void)
     esp_timer_start_periodic(tick_timer, kLvglTickPeriodMs * 1000);
 
     lv_obj_t* label = lv_label_create(lv_screen_active());
-    lv_label_set_text(label, "Kairos");
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(label, "Kairos\nwaiting for IMU...");
     lv_obj_center(label);
 
     printf("LVGL running\n");
 
+    // M3 debug overlay: raw accel/gyro readout. No tap count here yet —
+    // that needs the QMI8658 hardware Tap Engine configured, which is M4.
+    static Qmi8658 imu(GPIO_NUM_6, GPIO_NUM_7);
+    int64_t next_sensor_update_us = 0;
+
     while (true) {
+        const int64_t now_us = esp_timer_get_time();
+        if (now_us >= next_sensor_update_us) {
+            Qmi8658::Sample sample;
+            if (imu.Read(sample)) {
+                // Accel to hundredths of g, gyro to tenths of dps.
+                const int ax = RoundToFixed(sample.accel_g[0], 100);
+                const int ay = RoundToFixed(sample.accel_g[1], 100);
+                const int az = RoundToFixed(sample.accel_g[2], 100);
+                const int gx = RoundToFixed(sample.gyro_dps[0], 10);
+                const int gy = RoundToFixed(sample.gyro_dps[1], 10);
+                const int gz = RoundToFixed(sample.gyro_dps[2], 10);
+                lv_label_set_text_fmt(label,
+                    "AX %+d.%02dg AY %+d.%02dg\nAZ %+d.%02dg\n"
+                    "GX %+d.%d GY %+d.%d\nGZ %+d.%d dps",
+                    ax / 100, abs(ax % 100), ay / 100, abs(ay % 100), az / 100, abs(az % 100),
+                    gx / 10, abs(gx % 10), gy / 10, abs(gy % 10), gz / 10, abs(gz % 10));
+            } else {
+                lv_label_set_text(label, "IMU read failed");
+            }
+            next_sensor_update_us = now_us + kSensorUpdatePeriodUs;
+        }
+
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(kLvglTickPeriodMs));
     }
