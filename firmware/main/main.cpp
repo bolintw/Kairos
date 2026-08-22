@@ -6,6 +6,7 @@
 #include "lvgl.h"
 
 #include "gpio_pin.hpp"
+#include "i2c_scan.hpp"
 #include "lgfx_config.hpp"
 
 namespace {
@@ -47,6 +48,8 @@ extern "C" void app_main(void)
 
     lcd.init();
     printf("LCD initialized\n");
+
+    RunI2cScan();
 
     lv_init();
 
