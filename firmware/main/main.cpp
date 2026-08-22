@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 
+#include "attitude_estimator.hpp"
 #include "gpio_pin.hpp"
 #include "i2c_scan.hpp"
 #include "lgfx_config.hpp"
@@ -15,6 +16,9 @@ namespace {
 constexpr int kLvglTickPeriodMs = 5;
 constexpr int kDrawBufRows = 20;  // partial buffer: 20 rows of the 240-wide panel
 constexpr int64_t kSensorUpdatePeriodUs = 150 * 1000;  // readable, not maxed out
+constexpr uint32_t kSensorUpdatePeriodMs = kSensorUpdatePeriodUs / 1000;
+constexpr int kGyroChartPoints = 60;      // 60 * 150ms = 9s of history
+constexpr int kGyroChartRangeDps = 250;   // +-range; adjust if rotations clip
 
 // static: app_main's task exits after returning, and GpioPin's destructor
 // would call gpio_reset_pin() and turn the backlight back off. A static
@@ -63,6 +67,22 @@ FixedParts SplitFixed(int fixed, int scale)
     return FixedParts{fixed < 0 ? '-' : '+', mag / scale, mag % scale};
 }
 
+// AttitudeEstimator deliberately doesn't include qmi8658.hpp (no
+// hardware/I2C knowledge, so it stays host-testable), so its Sample type
+// is distinct from Qmi8658::Sample even though the fields line up —
+// convert explicitly at the call site instead.
+AttitudeEstimator::Sample ToAttitudeSample(const Qmi8658::Sample& s)
+{
+    AttitudeEstimator::Sample out;
+    out.accel_g[0] = s.accel_g[0];
+    out.accel_g[1] = s.accel_g[1];
+    out.accel_g[2] = s.accel_g[2];
+    out.gyro_dps[0] = s.gyro_dps[0];
+    out.gyro_dps[1] = s.gyro_dps[1];
+    out.gyro_dps[2] = s.gyro_dps[2];
+    return out;
+}
+
 }  // namespace
 
 extern "C" void app_main(void)
@@ -104,7 +124,24 @@ extern "C" void app_main(void)
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(label, "Kairos\nwaiting for IMU...");
-    lv_obj_center(label);
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 30);
+
+    // Gyro X/Y/Z scrolling chart — raw numbers refresh too fast to read a
+    // trend out of, especially with how noisy gyro is at rest. Red=X,
+    // Green=Y, Blue=Z.
+    lv_obj_t* gyro_chart = lv_chart_create(lv_screen_active());
+    lv_obj_set_size(gyro_chart, 170, 100);
+    lv_obj_align(gyro_chart, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_chart_set_type(gyro_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(gyro_chart, kGyroChartPoints);
+    lv_chart_set_range(gyro_chart, LV_CHART_AXIS_PRIMARY_Y, -kGyroChartRangeDps, kGyroChartRangeDps);
+    lv_chart_set_update_mode(gyro_chart, LV_CHART_UPDATE_MODE_SHIFT);
+    lv_chart_series_t* gx_series =
+        lv_chart_add_series(gyro_chart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_series_t* gy_series =
+        lv_chart_add_series(gyro_chart, lv_palette_main(LV_PALETTE_GREEN), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_series_t* gz_series =
+        lv_chart_add_series(gyro_chart, lv_palette_main(LV_PALETTE_BLUE), LV_CHART_AXIS_PRIMARY_Y);
 
     printf("LVGL running\n");
 
@@ -125,6 +162,16 @@ extern "C" void app_main(void)
     // no physical tap). Discard it here so the count starts clean.
     (void)imu.PollTapEvent();
 
+    static AttitudeEstimator attitude_estimator;
+    {
+        // Assumes the device is stationary at boot, per
+        // CalibrateGyroZeroOffset()'s documented contract.
+        Qmi8658::Sample boot_sample;
+        if (imu.Read(boot_sample)) {
+            attitude_estimator.CalibrateGyroZeroOffset(ToAttitudeSample(boot_sample));
+        }
+    }
+
     int64_t next_sensor_update_us = 0;
     int tap_count = 0;
 
@@ -141,15 +188,28 @@ extern "C" void app_main(void)
                 const FixedParts ax = SplitFixed(RoundToFixed(sample.accel_g[0], 100), 100);
                 const FixedParts ay = SplitFixed(RoundToFixed(sample.accel_g[1], 100), 100);
                 const FixedParts az = SplitFixed(RoundToFixed(sample.accel_g[2], 100), 100);
-                const FixedParts gx = SplitFixed(RoundToFixed(sample.gyro_dps[0], 10), 10);
-                const FixedParts gy = SplitFixed(RoundToFixed(sample.gyro_dps[1], 10), 10);
-                const FixedParts gz = SplitFixed(RoundToFixed(sample.gyro_dps[2], 10), 10);
+
+                const AttitudeEstimator::Output attitude =
+                    attitude_estimator.Update(ToAttitudeSample(sample), kSensorUpdatePeriodMs);
+                const FixedParts angle = SplitFixed(RoundToFixed(attitude.screen_angle_deg, 10), 10);
+
                 lv_label_set_text_fmt(label,
-                    "AX %c%d.%02dg AY %c%d.%02dg\nAZ %c%d.%02dg\n"
-                    "GX %c%d.%d GY %c%d.%d\nGZ %c%d.%d dps\nTaps %d",
+                    "AX %c%d.%02dg AY %c%d.%02dg AZ %c%d.%02dg\nTaps %d  Ang %c%d.%01d Mv%d Vp%d",
                     ax.sign, ax.whole, ax.frac, ay.sign, ay.whole, ay.frac, az.sign, az.whole, az.frac,
-                    gx.sign, gx.whole, gx.frac, gy.sign, gy.whole, gy.frac, gz.sign, gz.whole, gz.frac,
-                    tap_count);
+                    tap_count, angle.sign, angle.whole, angle.frac,
+                    attitude.is_moving ? 1 : 0, attitude.in_valid_plane ? 1 : 0);
+
+                // Gyro goes to the chart instead of text — whole-dps
+                // resolution is plenty for spotting a rotation's shape.
+                auto to_chart_value = [](float dps) {
+                    int whole = RoundToFixed(dps, 1);
+                    if (whole > kGyroChartRangeDps) whole = kGyroChartRangeDps;
+                    if (whole < -kGyroChartRangeDps) whole = -kGyroChartRangeDps;
+                    return static_cast<lv_coord_t>(whole);
+                };
+                lv_chart_set_next_value(gyro_chart, gx_series, to_chart_value(sample.gyro_dps[0]));
+                lv_chart_set_next_value(gyro_chart, gy_series, to_chart_value(sample.gyro_dps[1]));
+                lv_chart_set_next_value(gyro_chart, gz_series, to_chart_value(sample.gyro_dps[2]));
             } else {
                 lv_label_set_text(label, "IMU read failed");
             }
