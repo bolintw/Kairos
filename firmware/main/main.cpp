@@ -1,5 +1,4 @@
 #include <cstdio>
-#include <cstdlib>
 
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -47,6 +46,21 @@ void lvgl_tick_cb(void*)
 int RoundToFixed(float value, int scale)
 {
     return static_cast<int>(value * scale + (value >= 0 ? 0.5f : -0.5f));
+}
+
+// Splits a fixed-point value into sign + whole + fractional digits for
+// display. Needed because plain `fixed / scale` truncates toward zero:
+// for fixed=-85, scale=100, that gives whole=0 with no sign information
+// left in it, so "%+d" on the whole part alone prints "+0" — silently
+// hiding the sign on every reading with magnitude under 1.0. Splitting
+// off the sign before dividing the (now always non-negative) magnitude
+// avoids that.
+struct FixedParts { char sign; int whole; int frac; };
+
+FixedParts SplitFixed(int fixed, int scale)
+{
+    const int mag = fixed < 0 ? -fixed : fixed;
+    return FixedParts{fixed < 0 ? '-' : '+', mag / scale, mag % scale};
 }
 
 }  // namespace
@@ -124,17 +138,17 @@ extern "C" void app_main(void)
             Qmi8658::Sample sample;
             if (imu.Read(sample)) {
                 // Accel to hundredths of g, gyro to tenths of dps.
-                const int ax = RoundToFixed(sample.accel_g[0], 100);
-                const int ay = RoundToFixed(sample.accel_g[1], 100);
-                const int az = RoundToFixed(sample.accel_g[2], 100);
-                const int gx = RoundToFixed(sample.gyro_dps[0], 10);
-                const int gy = RoundToFixed(sample.gyro_dps[1], 10);
-                const int gz = RoundToFixed(sample.gyro_dps[2], 10);
+                const FixedParts ax = SplitFixed(RoundToFixed(sample.accel_g[0], 100), 100);
+                const FixedParts ay = SplitFixed(RoundToFixed(sample.accel_g[1], 100), 100);
+                const FixedParts az = SplitFixed(RoundToFixed(sample.accel_g[2], 100), 100);
+                const FixedParts gx = SplitFixed(RoundToFixed(sample.gyro_dps[0], 10), 10);
+                const FixedParts gy = SplitFixed(RoundToFixed(sample.gyro_dps[1], 10), 10);
+                const FixedParts gz = SplitFixed(RoundToFixed(sample.gyro_dps[2], 10), 10);
                 lv_label_set_text_fmt(label,
-                    "AX %+d.%02dg AY %+d.%02dg\nAZ %+d.%02dg\n"
-                    "GX %+d.%d GY %+d.%d\nGZ %+d.%d dps\nTaps %d",
-                    ax / 100, abs(ax % 100), ay / 100, abs(ay % 100), az / 100, abs(az % 100),
-                    gx / 10, abs(gx % 10), gy / 10, abs(gy % 10), gz / 10, abs(gz % 10),
+                    "AX %c%d.%02dg AY %c%d.%02dg\nAZ %c%d.%02dg\n"
+                    "GX %c%d.%d GY %c%d.%d\nGZ %c%d.%d dps\nTaps %d",
+                    ax.sign, ax.whole, ax.frac, ay.sign, ay.whole, ay.frac, az.sign, az.whole, az.frac,
+                    gx.sign, gx.whole, gx.frac, gy.sign, gy.whole, gy.frac, gz.sign, gz.whole, gz.frac,
                     tap_count);
             } else {
                 lv_label_set_text(label, "IMU read failed");
