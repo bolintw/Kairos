@@ -94,12 +94,31 @@ extern "C" void app_main(void)
 
     printf("LVGL running\n");
 
-    // M3 debug overlay: raw accel/gyro readout. No tap count here yet —
-    // that needs the QMI8658 hardware Tap Engine configured, which is M4.
+    // M3/M4 debug overlay: raw accel/gyro readout plus tap count.
     static Qmi8658 imu(GPIO_NUM_6, GPIO_NUM_7);
+
+    // M4 starting point, not a finished tune — adjust these while watching
+    // the tap count below and re-flashing. Windows are ported from
+    // SensorLib's deprecated tap example (peak_window=20, tap_window=50,
+    // d_tap_window=250, "@500Hz ODR"); doubled here since our accel ODR is
+    // 1000Hz, to keep roughly the same real-time windows. alpha/gamma and
+    // the g^2 thresholds are that example's values, unchanged (ODR-independent).
+    imu.ConfigureTap(/*priority=*/0, /*peak_window=*/40, /*tap_window=*/100,
+                      /*d_tap_window=*/500, /*alpha=*/0.0625f, /*gamma=*/0.25f,
+                      /*peak_mag_thr_g2=*/0.8f, /*udm_thr_g2=*/0.4f);
+    // Toggling Ctrl7/Ctrl8 while configuring the tap engine latches a
+    // spurious STATUS1 tap flag (observed as "Taps 1" right at boot, with
+    // no physical tap). Discard it here so the count starts clean.
+    (void)imu.PollTapEvent();
+
     int64_t next_sensor_update_us = 0;
+    int tap_count = 0;
 
     while (true) {
+        if (imu.PollTapEvent() != Qmi8658::TapEvent::kNone) {
+            ++tap_count;
+        }
+
         const int64_t now_us = esp_timer_get_time();
         if (now_us >= next_sensor_update_us) {
             Qmi8658::Sample sample;
@@ -113,9 +132,10 @@ extern "C" void app_main(void)
                 const int gz = RoundToFixed(sample.gyro_dps[2], 10);
                 lv_label_set_text_fmt(label,
                     "AX %+d.%02dg AY %+d.%02dg\nAZ %+d.%02dg\n"
-                    "GX %+d.%d GY %+d.%d\nGZ %+d.%d dps",
+                    "GX %+d.%d GY %+d.%d\nGZ %+d.%d dps\nTaps %d",
                     ax / 100, abs(ax % 100), ay / 100, abs(ay % 100), az / 100, abs(az % 100),
-                    gx / 10, abs(gx % 10), gy / 10, abs(gy % 10), gz / 10, abs(gz % 10));
+                    gx / 10, abs(gx % 10), gy / 10, abs(gy % 10), gz / 10, abs(gz % 10),
+                    tap_count);
             } else {
                 lv_label_set_text(label, "IMU read failed");
             }

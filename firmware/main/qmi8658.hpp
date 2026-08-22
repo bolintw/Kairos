@@ -4,28 +4,32 @@
 #include <cstdio>
 
 #include "driver/i2c_master.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
-// Minimal QMI8658 accel+gyro reader for the M3 debug overlay. Register
-// addresses, init sequence, and scale factors are ported from Waveshare's
-// official Arduino demo for this exact board (ESP32-S3-LCD-1.28-Demo.zip,
-// QMI8658.cpp) rather than re-derived from the datasheet PDF, since that
-// demo is confirmed working on this hardware.
+// Minimal QMI8658 accel+gyro+tap reader for the M3/M4 debug overlay.
+// Accel/gyro register addresses and init sequence are ported from
+// Waveshare's official Arduino demo for this exact board
+// (ESP32-S3-LCD-1.28-Demo.zip, QMI8658.cpp), which doesn't cover tap
+// detection. The Tap Engine protocol (CTRL9 command handshake, CAL1-4
+// register layout, TAP_STATUS bit layout) is ported instead from
+// lewisxhe/SensorLib's SensorQMI8658.hpp — a widely used community
+// driver for this exact chip — rather than re-derived from the
+// datasheet PDF, which isn't reliably text-extractable here.
 //
 // Self-contained: owns its own I2C bus + device, separate from the
 // one-shot bus RunI2cScan() creates and tears down in i2c_scan.hpp.
 // Whether AttitudeEstimator (M5) shares a bus with this or replaces it
 // entirely is an open design question for that milestone, not decided
 // here — this class exists only to drive the M3/M4 debug overlay.
-//
-// No tap-detection support yet: that's the QMI8658 hardware Tap Engine,
-// configured via the CTRL9 command protocol per datasheet Section 10,
-// which is M4's job. Waveshare's demo doesn't implement it either.
 class Qmi8658 {
 public:
     struct Sample {
         float accel_g[3];    // X, Y, Z in units of g, +-8g range
         float gyro_dps[3];   // X, Y, Z in degrees/sec, +-512dps range
     };
+
+    enum class TapEvent { kNone, kSingle, kDouble };
 
     Qmi8658(gpio_num_t sda, gpio_num_t scl, uint16_t addr = 0x6B)
     {
@@ -93,13 +97,105 @@ public:
         return true;
     }
 
+    // Configures the hardware Tap Engine. Values here are M4's starting
+    // point for calibration, not a finished tune — see main.cpp for the
+    // actual numbers in use and where they came from.
+    //
+    // priority: which axis wins when peaks land simultaneously (0 = X>Y>Z,
+    //   per SensorLib's TapDetectionPriority enum).
+    // peak_window/tap_window/d_tap_window: durations in *samples* at the
+    //   configured accel ODR (1000Hz here).
+    // alpha/gamma: smoothing ratios for the engine's internal running
+    //   averages, unitless, not ODR-dependent.
+    // peak_mag_thr_g2/udm_thr_g2: peak and quiet thresholds in g^2.
+    void ConfigureTap(uint8_t priority, uint8_t peak_window, uint16_t tap_window,
+                       uint16_t d_tap_window, float alpha, float gamma,
+                       float peak_mag_thr_g2, float udm_thr_g2)
+    {
+        if (!dev_) return;
+
+        // The CAL1-4 registers double as tap-config scratch space, so
+        // accel/gyro are paused while writing them (matches SensorLib's
+        // configTap, which does the same before restoring CTRL7).
+        WriteReg(kRegCtrl7, 0x00);
+
+        WriteReg(kRegCal1L, peak_window);
+        WriteReg(kRegCal1H, priority);
+        WriteReg(kRegCal2L, tap_window & 0xFF);
+        WriteReg(kRegCal2H, (tap_window >> 8) & 0xFF);
+        WriteReg(kRegCal3L, d_tap_window & 0xFF);
+        WriteReg(kRegCal3H, (d_tap_window >> 8) & 0xFF);
+        WriteReg(kRegCal4H, 0x01);
+        WriteCommandAndWait(kCmdConfigureTap);
+
+        WriteReg(kRegCal1L, static_cast<uint8_t>(alpha * 128));
+        WriteReg(kRegCal1H, static_cast<uint8_t>(gamma * 128));
+
+        // Resolution is documented as 0.001 g^2/LSB, so value = thr * 1000.
+        const uint16_t peak_val = static_cast<uint16_t>(peak_mag_thr_g2 * 1000.0f + 0.5f);
+        WriteReg(kRegCal2L, peak_val & 0xFF);
+        WriteReg(kRegCal2H, (peak_val >> 8) & 0xFF);
+
+        const uint16_t udm_val = static_cast<uint16_t>(udm_thr_g2 * 1000.0f + 0.5f);
+        WriteReg(kRegCal3L, udm_val & 0xFF);
+        WriteReg(kRegCal3H, (udm_val >> 8) & 0xFF);
+        WriteReg(kRegCal4H, 0x02);
+        WriteCommandAndWait(kCmdConfigureTap);
+
+        WriteReg(kRegCtrl7, 0x03);  // re-enable accel + gyro
+        WriteReg(kRegCtrl8, 0x01);  // enable tap detection (bit 0)
+    }
+
+    // Polls for a new tap event. TAP_STATUS (0x59) holds the *type* of the
+    // most recent tap, but its value doesn't change between two same-type
+    // taps in a row, so diffing it directly misses repeats — that was this
+    // function's first version, and it's why only one tap ever registered.
+    // STATUS1 bit1 is the actual "a new tap happened since last check"
+    // signal (inferred from SensorLib's update(), which polls STATUS1
+    // this way in a loop and correctly counts repeated taps — not
+    // confirmed against the datasheet directly, but the alternative
+    // matches observed behavior exactly). Only read TAP_STATUS for the
+    // single/double detail once STATUS1 says a new event is there.
+    TapEvent PollTapEvent()
+    {
+        if (!dev_) return TapEvent::kNone;
+
+        uint8_t status1 = 0;
+        if (!ReadRegs(kRegStatus1, &status1, 1)) return TapEvent::kNone;
+        if ((status1 & 0x02) == 0) return TapEvent::kNone;
+
+        uint8_t tap_status = 0;
+        if (!ReadRegs(kRegTapStatus, &tap_status, 1)) return TapEvent::kNone;
+
+        switch (tap_status & 0x03) {
+            case 1: return TapEvent::kSingle;
+            case 2: return TapEvent::kDouble;
+            default: return TapEvent::kNone;
+        }
+    }
+
 private:
     static constexpr uint8_t kRegCtrl1 = 0x02;
     static constexpr uint8_t kRegCtrl2 = 0x03;
     static constexpr uint8_t kRegCtrl3 = 0x04;
     static constexpr uint8_t kRegCtrl5 = 0x06;
     static constexpr uint8_t kRegCtrl7 = 0x08;
+    static constexpr uint8_t kRegCtrl8 = 0x09;
+    static constexpr uint8_t kRegCtrl9 = 0x0A;
+    static constexpr uint8_t kRegCal1L = 0x0B;
+    static constexpr uint8_t kRegCal1H = 0x0C;
+    static constexpr uint8_t kRegCal2L = 0x0D;
+    static constexpr uint8_t kRegCal2H = 0x0E;
+    static constexpr uint8_t kRegCal3L = 0x0F;
+    static constexpr uint8_t kRegCal3H = 0x10;
+    static constexpr uint8_t kRegCal4H = 0x12;
+    static constexpr uint8_t kRegStatusInt = 0x2D;
+    static constexpr uint8_t kRegStatus1 = 0x2F;
+    static constexpr uint8_t kRegTapStatus = 0x59;
     static constexpr uint8_t kRegAxL = 0x35;
+
+    static constexpr uint8_t kCmdAck = 0x00;
+    static constexpr uint8_t kCmdConfigureTap = 0x0C;
 
     static constexpr float kAccelLsbPerG = 4096.0f;   // +-8g range
     static constexpr float kGyroLsbPerDps = 64.0f;    // +-512dps range
@@ -113,6 +209,27 @@ private:
     bool ReadRegs(uint8_t reg, uint8_t* buf, size_t len)
     {
         return i2c_master_transmit_receive(dev_, &reg, 1, buf, len, 50) == ESP_OK;
+    }
+
+    // CTRL9 host command handshake: write the command, wait for the
+    // "done" bit (STATUS_INT bit7), ack it, wait for the bit to clear.
+    bool WriteCommandAndWait(uint8_t cmd)
+    {
+        WriteReg(kRegCtrl9, cmd);
+        if (!WaitForStatusIntBit(true)) return false;
+        WriteReg(kRegCtrl9, kCmdAck);
+        return WaitForStatusIntBit(false);
+    }
+
+    bool WaitForStatusIntBit(bool want_set)
+    {
+        for (int i = 0; i < 200; ++i) {  // ~200ms timeout at 1ms/iteration
+            uint8_t val = 0;
+            if (!ReadRegs(kRegStatusInt, &val, 1)) return false;
+            if (((val & 0x80) != 0) == want_set) return true;
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        return false;
     }
 
     i2c_master_bus_handle_t bus_ = nullptr;
