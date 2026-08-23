@@ -5,8 +5,10 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 
+#include "app_controller.hpp"
 #include "attitude_estimator.hpp"
 #include "gpio_pin.hpp"
+#include "gui_manager.hpp"
 #include "i2c_scan.hpp"
 #include "lgfx_config.hpp"
 #include "qmi8658.hpp"
@@ -145,6 +147,12 @@ extern "C" void app_main(void)
 
     printf("LVGL running\n");
 
+    // M6 first pass: single hardcoded StopwatchFace via AppController,
+    // validating the tap/tick/render pipeline before face-switching
+    // exists. See app_controller.hpp for the deliberate scoping.
+    static GuiManager gui_manager;
+    static AppController app_controller(gui_manager);
+
     // M3/M4 debug overlay: raw accel/gyro readout plus tap count.
     static Qmi8658 imu(GPIO_NUM_6, GPIO_NUM_7);
 
@@ -173,14 +181,26 @@ extern "C" void app_main(void)
     }
 
     int64_t next_sensor_update_us = 0;
+    int64_t last_loop_us = esp_timer_get_time();
     int tap_count = 0;
 
     while (true) {
         if (imu.PollTapEvent() != Qmi8658::TapEvent::kNone) {
             ++tap_count;
+            app_controller.OnTap();
         }
 
+        // Actual loop period isn't a fixed kLvglTickPeriodMs — the
+        // blocking I2C tap poll above (and the periodic full sensor read
+        // below) stretch it — so measure real elapsed time rather than
+        // assuming the nominal tick, or AppController's onTick()
+        // undercounts and everything that depends on it (this stopwatch)
+        // runs slow.
         const int64_t now_us = esp_timer_get_time();
+        const uint32_t loop_dt_ms = static_cast<uint32_t>((now_us - last_loop_us) / 1000);
+        last_loop_us = now_us;
+        app_controller.Update(loop_dt_ms);
+
         if (now_us >= next_sensor_update_us) {
             Qmi8658::Sample sample;
             if (imu.Read(sample)) {
