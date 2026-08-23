@@ -18,7 +18,6 @@ namespace {
 constexpr int kLvglTickPeriodMs = 5;
 constexpr int kDrawBufRows = 20;  // partial buffer: 20 rows of the 240-wide panel
 constexpr int64_t kSensorUpdatePeriodUs = 150 * 1000;  // readable, not maxed out
-constexpr uint32_t kSensorUpdatePeriodMs = kSensorUpdatePeriodUs / 1000;
 constexpr int kGyroChartPoints = 60;      // 60 * 150ms = 9s of history
 constexpr int kGyroChartRangeDps = 250;   // +-range; adjust if rotations clip
 
@@ -147,9 +146,9 @@ extern "C" void app_main(void)
 
     printf("LVGL running\n");
 
-    // M6 first pass: single hardcoded StopwatchFace via AppController,
-    // validating the tap/tick/render pipeline before face-switching
-    // exists. See app_controller.hpp for the deliberate scoping.
+    // M6: AppController owns attitude-driven face switching (via
+    // AttitudeEstimator::Output, computed below) plus tap routing and
+    // TimerFace lifecycle. See app_controller.hpp for the design.
     static GuiManager gui_manager;
     static AppController app_controller(gui_manager);
 
@@ -181,7 +180,7 @@ extern "C" void app_main(void)
     }
 
     int64_t next_sensor_update_us = 0;
-    int64_t last_loop_us = esp_timer_get_time();
+    int64_t last_sensor_update_us = esp_timer_get_time();
     int tap_count = 0;
 
     while (true) {
@@ -190,18 +189,19 @@ extern "C" void app_main(void)
             app_controller.OnTap();
         }
 
-        // Actual loop period isn't a fixed kLvglTickPeriodMs — the
-        // blocking I2C tap poll above (and the periodic full sensor read
-        // below) stretch it — so measure real elapsed time rather than
-        // assuming the nominal tick, or AppController's onTick()
-        // undercounts and everything that depends on it (this stopwatch)
-        // runs slow.
         const int64_t now_us = esp_timer_get_time();
-        const uint32_t loop_dt_ms = static_cast<uint32_t>((now_us - last_loop_us) / 1000);
-        last_loop_us = now_us;
-        app_controller.Update(loop_dt_ms);
-
         if (now_us >= next_sensor_update_us) {
+            // Measure real elapsed time rather than assuming exactly
+            // kSensorUpdatePeriodUs — this block doesn't fire at a
+            // perfectly fixed cadence (loop jitter from the blocking I2C
+            // tap poll, LVGL rendering, etc.), and both the gyro
+            // integration in AttitudeEstimator and AppController's
+            // onTick() need the real value or they drift, same class of
+            // bug as the earlier stopwatch timing fix.
+            const uint32_t sensor_dt_ms =
+                static_cast<uint32_t>((now_us - last_sensor_update_us) / 1000);
+            last_sensor_update_us = now_us;
+
             Qmi8658::Sample sample;
             if (imu.Read(sample)) {
                 // Accel to hundredths of g, gyro to tenths of dps.
@@ -210,8 +210,10 @@ extern "C" void app_main(void)
                 const FixedParts az = SplitFixed(RoundToFixed(sample.accel_g[2], 100), 100);
 
                 const AttitudeEstimator::Output attitude =
-                    attitude_estimator.Update(ToAttitudeSample(sample), kSensorUpdatePeriodMs);
+                    attitude_estimator.Update(ToAttitudeSample(sample), sensor_dt_ms);
                 const FixedParts angle = SplitFixed(RoundToFixed(attitude.screen_angle_deg, 10), 10);
+
+                app_controller.Update(attitude, sensor_dt_ms);
 
                 lv_label_set_text_fmt(label,
                     "AX %c%d.%02dg AY %c%d.%02dg AZ %c%d.%02dg\nTaps %d  Ang %c%d.%01d Mv%d Vp%d",
