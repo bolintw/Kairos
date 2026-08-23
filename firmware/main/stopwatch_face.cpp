@@ -39,3 +39,8 @@ void StopwatchFace::render(GuiManager& gui)
                    static_cast<unsigned int>(minutes), static_cast<unsigned int>(seconds));
     gui.SetPrimaryText(buf);
 }
+
+TimerFace::Status StopwatchFace::GetStatus() const
+{
+    return Status{running_, /*has_target=*/false, /*remaining_ms=*/0};
+}

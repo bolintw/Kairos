@@ -1,5 +1,6 @@
 #pragma once
 
+#include "lgfx_config.hpp"
 #include "lvgl.h"
 
 // Font for the primary timer display, pulled out so it's a one-line
@@ -9,19 +10,31 @@
 // that isn't enabled there needs that turned on too.
 constexpr const lv_font_t* kPrimaryFont = &lv_font_montserrat_32;
 
-// DRAFT, deliberately minimal. Full LVGL integration (screen
-// counter-rotation driven by AttitudeEstimator::Output::screen_angle_deg,
-// brightness/hue notifications) is M7's scope — see plan. For now this
-// exists only so TimerFace::render() has something concrete to call:
-// TimerFace decides *what* text to show, GuiManager just draws it. Expect
-// this class to grow significantly at M7; not trying to anticipate that
-// shape here.
+// M7: owns the LVGL widget(s) and the backlight (via LGFX's Light_PWM,
+// injected by reference — DI, no Singleton, matching the rest of the
+// project). TimerFace decides *what* to show (via render()) and
+// AppController decides brightness/color *state* (via SetBrightness/
+// SetWarmth, driven by its notification state machine); GuiManager only
+// knows how to paint whatever it's told. Screen counter-rotation
+// (following AttitudeEstimator::Output::screen_angle_deg) is still
+// deferred — plan flags it nice-to-have, not required for v1.
 class GuiManager {
 public:
-    GuiManager();
+    explicit GuiManager(LGFX& lcd);
 
     void SetPrimaryText(const char* text);
 
+    // brightness: 0.0 (off) to 1.0 (full). Scaled to the LGFX/LEDC 0-255
+    // range internally.
+    void SetBrightness(float brightness);
+
+    // warmth: 0.0 (normal/white text) to 1.0 (fully warm/red) — the
+    // "尾聲脈動...色調偏暖/紅" notification. Linear RGB interpolation
+    // between white and a warm red, not true HSV hue rotation; simple
+    // and sufficient for a single-color text label.
+    void SetWarmth(float warmth);
+
 private:
+    LGFX& lcd_;
     lv_obj_t* label_;
 };

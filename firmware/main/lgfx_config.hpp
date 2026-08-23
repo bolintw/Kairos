@@ -6,13 +6,17 @@
 // Waveshare ESP32-S3-LCD-1.28 (Non-Touch): GC9A01A driving a 240x240
 // round panel over SPI. Pin values from hardware_pinout.md.
 //
-// Backlight (GPIO40) is intentionally NOT configured here — it's driven
-// directly via GpioPin in main.cpp, so this class doesn't double-own that
-// pin through LGFX's own Light_PWM controller.
+// Backlight (GPIO40) is driven via LovyanGFX's built-in Light_PWM
+// controller (LEDC PWM under the hood), not a plain on/off GpioPin — M1
+// used GpioPin since only on/off was needed then, but M7's brightness
+// notifications (fade, breathing pulse) need real analog dimming.
+// Channel 7 avoids the low channels LovyanGFX's own SPI/DMA setup might
+// touch.
 class LGFX : public lgfx::LGFX_Device {
 public:
     lgfx::Panel_GC9A01 _panel_instance;
     lgfx::Bus_SPI _bus_instance;
+    lgfx::Light_PWM _light_instance;
 
     LGFX(void) {
         {
@@ -50,6 +54,15 @@ public:
             cfg.dlen_16bit = false;
             cfg.bus_shared = false;
             _panel_instance.config(cfg);
+        }
+        {
+            auto cfg = _light_instance.config();
+            cfg.pin_bl = 40;
+            cfg.invert = false;
+            cfg.freq = 44100;
+            cfg.pwm_channel = 7;
+            _light_instance.config(cfg);
+            _panel_instance.setLight(&_light_instance);
         }
         setPanel(&_panel_instance);
     }

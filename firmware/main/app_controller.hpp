@@ -52,8 +52,24 @@
 //
 // 4. Face D has no defined behavior yet (plan: 待定，暫緩實作). Rather
 //    than a placeholder concrete TimerFace, `current_` is simply nullptr
-//    while on face D; Update()/OnTap() no-op in that case. Revisit once
-//    D's functionality is decided.
+//    while on face D; Update()/OnTap() no-op in that case (brightness set
+//    to 0 — nothing to show). Revisit once D's functionality is decided.
+//
+// 5. Brightness/notification state machine (M7, plan's "亮度作為通知系
+//    統"), driven off TimerFace::Status polled each tick, edge-detected
+//    here (is_running true->false/false->true, remaining_ms jumping up
+//    = a new phase started):
+//      - face entry (onEnter() just called): snap to full bright,
+//        regardless of the new face's initial is_running (always paused
+//        on entry, but a flip should read as an obvious bright event)
+//      - just started running, or a phase just changed: snap to full
+//        bright, then fade toward a dimmed level over ~10s while running
+//      - within the last ~10s of a phase with a target duration: breathing
+//        brightness pulse + warm/red tint, overriding the fade
+//      - just paused: snap to full bright immediately
+//      - paused continuously past a much longer (minutes-scale) idle
+//        timeout: dim to fully off, independent of the ~10s timeout above
+//    TimerFace never sees any of this — GetStatus() is facts only.
 //
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
@@ -74,10 +90,18 @@ public:
 private:
     Face QuantizeFace(float screen_angle_deg) const;  // stateful — reads current_face_, see design note 1 above
     std::unique_ptr<TimerFace> CreateFace(Face face);  // the "Factory"
+    void UpdateBrightness(uint32_t dt_ms);             // see design note 5 above
 
     GuiManager& gui_manager_;
     std::unique_ptr<TimerFace> current_;  // nullptr while on face D
     Face current_face_ = Face::kA;         // confirmed face; meaningless until first settle
     bool was_disturbed_ = true;            // starts true so boot's first settle is handled
     bool crossed_face_ = true;             // starts true so boot's first settle creates a face
+
+    float brightness_ = 1.0f;
+    uint32_t bright_phase_elapsed_ms_ = 0;  // ms since the last "became bright" event, drives the fade
+    uint32_t paused_elapsed_ms_ = 0;        // ms continuously paused, drives the long idle timeout
+    bool prev_is_running_ = false;
+    bool prev_has_target_ = false;
+    uint32_t prev_remaining_ms_ = 0;
 };

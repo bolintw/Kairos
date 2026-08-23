@@ -7,7 +7,6 @@
 
 #include "app_controller.hpp"
 #include "attitude_estimator.hpp"
-#include "gpio_pin.hpp"
 #include "gui_manager.hpp"
 #include "i2c_scan.hpp"
 #include "lgfx_config.hpp"
@@ -18,13 +17,12 @@ namespace {
 constexpr int kLvglTickPeriodMs = 5;
 constexpr int kDrawBufRows = 20;  // partial buffer: 20 rows of the 240-wide panel
 constexpr int64_t kSensorUpdatePeriodUs = 150 * 1000;  // readable, not maxed out
-constexpr int kGyroChartPoints = 60;      // 60 * 150ms = 9s of history
-constexpr int kGyroChartRangeDps = 250;   // +-range; adjust if rotations clip
 
-// static: app_main's task exits after returning, and GpioPin's destructor
-// would call gpio_reset_pin() and turn the backlight back off. A static
-// local outlives the task, so the pin stays configured and held high.
-static GpioPin backlight(GPIO_NUM_40, GpioPin::Direction::Output);
+// Flip to false to hide the debug overlay entirely (angle/taps/is_moving
+// label at the top) without deleting the code — flip back on when
+// debugging attitude/tap behavior again.
+constexpr bool kDebugOverlayEnabled = true;
+
 static LGFX lcd;
 static uint8_t lvgl_draw_buf[240 * kDrawBufRows * 2];  // RGB565, 2 bytes/px
 
@@ -90,11 +88,9 @@ extern "C" void app_main(void)
 {
     printf("Kairos gravity timer — hello from C++\n");
 
-    backlight.set(true);
-    printf("Backlight on (GPIO40)\n");
-
     lcd.init();
-    printf("LCD initialized\n");
+    lcd.setBrightness(255);  // full bright at boot; AppController takes over from here
+    printf("LCD initialized, backlight on (GPIO40 via PWM)\n");
 
     RunI2cScan();
 
@@ -121,35 +117,27 @@ extern "C" void app_main(void)
     esp_timer_create(&tick_timer_args, &tick_timer);
     esp_timer_start_periodic(tick_timer, kLvglTickPeriodMs * 1000);
 
-    lv_obj_t* label = lv_label_create(lv_screen_active());
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(label, "Kairos\nwaiting for IMU...");
-    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 30);
+    // Black background — the default LVGL theme is light, which clashes
+    // once AppController starts dimming/warming the primary label's color.
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
 
-    // Gyro X/Y/Z scrolling chart — raw numbers refresh too fast to read a
-    // trend out of, especially with how noisy gyro is at rest. Red=X,
-    // Green=Y, Blue=Z.
-    lv_obj_t* gyro_chart = lv_chart_create(lv_screen_active());
-    lv_obj_set_size(gyro_chart, 170, 100);
-    lv_obj_align(gyro_chart, LV_ALIGN_BOTTOM_MID, 0, -30);
-    lv_chart_set_type(gyro_chart, LV_CHART_TYPE_LINE);
-    lv_chart_set_point_count(gyro_chart, kGyroChartPoints);
-    lv_chart_set_range(gyro_chart, LV_CHART_AXIS_PRIMARY_Y, -kGyroChartRangeDps, kGyroChartRangeDps);
-    lv_chart_set_update_mode(gyro_chart, LV_CHART_UPDATE_MODE_SHIFT);
-    lv_chart_series_t* gx_series =
-        lv_chart_add_series(gyro_chart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_PRIMARY_Y);
-    lv_chart_series_t* gy_series =
-        lv_chart_add_series(gyro_chart, lv_palette_main(LV_PALETTE_GREEN), LV_CHART_AXIS_PRIMARY_Y);
-    lv_chart_series_t* gz_series =
-        lv_chart_add_series(gyro_chart, lv_palette_main(LV_PALETTE_BLUE), LV_CHART_AXIS_PRIMARY_Y);
+    lv_obj_t* label = nullptr;
+    if (kDebugOverlayEnabled) {
+        label = lv_label_create(lv_screen_active());
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(label, lv_color_white(), 0);
+        lv_label_set_text(label, "waiting for IMU...");
+        lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 30);
+    }
 
     printf("LVGL running\n");
 
     // M6: AppController owns attitude-driven face switching (via
     // AttitudeEstimator::Output, computed below) plus tap routing and
     // TimerFace lifecycle. See app_controller.hpp for the design.
-    static GuiManager gui_manager;
+    static GuiManager gui_manager(lcd);
     static AppController app_controller(gui_manager);
 
     // M3/M4 debug overlay: raw accel/gyro readout plus tap count.
@@ -204,35 +192,18 @@ extern "C" void app_main(void)
 
             Qmi8658::Sample sample;
             if (imu.Read(sample)) {
-                // Accel to hundredths of g, gyro to tenths of dps.
-                const FixedParts ax = SplitFixed(RoundToFixed(sample.accel_g[0], 100), 100);
-                const FixedParts ay = SplitFixed(RoundToFixed(sample.accel_g[1], 100), 100);
-                const FixedParts az = SplitFixed(RoundToFixed(sample.accel_g[2], 100), 100);
-
                 const AttitudeEstimator::Output attitude =
                     attitude_estimator.Update(ToAttitudeSample(sample), sensor_dt_ms);
-                const FixedParts angle = SplitFixed(RoundToFixed(attitude.screen_angle_deg, 10), 10);
 
                 app_controller.Update(attitude, sensor_dt_ms);
 
-                lv_label_set_text_fmt(label,
-                    "AX %c%d.%02dg AY %c%d.%02dg AZ %c%d.%02dg\nTaps %d  Ang %c%d.%01d Mv%d Vp%d",
-                    ax.sign, ax.whole, ax.frac, ay.sign, ay.whole, ay.frac, az.sign, az.whole, az.frac,
-                    tap_count, angle.sign, angle.whole, angle.frac,
-                    attitude.is_moving ? 1 : 0, attitude.in_valid_plane ? 1 : 0);
-
-                // Gyro goes to the chart instead of text — whole-dps
-                // resolution is plenty for spotting a rotation's shape.
-                auto to_chart_value = [](float dps) {
-                    int whole = RoundToFixed(dps, 1);
-                    if (whole > kGyroChartRangeDps) whole = kGyroChartRangeDps;
-                    if (whole < -kGyroChartRangeDps) whole = -kGyroChartRangeDps;
-                    return static_cast<lv_coord_t>(whole);
-                };
-                lv_chart_set_next_value(gyro_chart, gx_series, to_chart_value(sample.gyro_dps[0]));
-                lv_chart_set_next_value(gyro_chart, gy_series, to_chart_value(sample.gyro_dps[1]));
-                lv_chart_set_next_value(gyro_chart, gz_series, to_chart_value(sample.gyro_dps[2]));
-            } else {
+                if (label) {
+                    const FixedParts angle = SplitFixed(RoundToFixed(attitude.screen_angle_deg, 10), 10);
+                    lv_label_set_text_fmt(label, "Ang %c%d.%01d  Taps %d  Mv%d",
+                        angle.sign, angle.whole, angle.frac,
+                        tap_count, attitude.is_moving ? 1 : 0);
+                }
+            } else if (label) {
                 lv_label_set_text(label, "IMU read failed");
             }
             next_sensor_update_us = now_us + kSensorUpdatePeriodUs;

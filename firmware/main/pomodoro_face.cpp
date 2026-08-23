@@ -65,3 +65,8 @@ void PomodoroFace::render(GuiManager& gui)
                    static_cast<unsigned int>(minutes), static_cast<unsigned int>(seconds));
     gui.SetPrimaryText(buf);
 }
+
+TimerFace::Status PomodoroFace::GetStatus() const
+{
+    return Status{running_, /*has_target=*/true, remaining_ms_};
+}

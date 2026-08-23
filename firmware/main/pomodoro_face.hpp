@@ -21,6 +21,7 @@ public:
     void onTick(uint32_t dt_ms) override;
     void onTap() override;     // toggle running/paused
     void render(GuiManager& gui) override;
+    Status GetStatus() const override;
 
 private:
     enum class Phase { kFocus, kBreak };

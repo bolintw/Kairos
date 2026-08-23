@@ -13,6 +13,7 @@ public:
     void onTick(uint32_t dt_ms) override;
     void onTap() override;
     void render(GuiManager& gui) override;
+    Status GetStatus() const override;
 
 private:
     uint32_t elapsed_ms_ = 0;
