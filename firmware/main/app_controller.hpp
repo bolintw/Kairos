@@ -30,17 +30,28 @@
 //    until within 10 of B's center (80 away from A/C's own center —
 //    same rule, just measured from the other side).
 //
-// 2. Reset (onExit/onEnter) fires only when the device actually crossed
-//    into a *different* quantized face at some point during a disturbance
-//    and then settled — not on every is_moving blip. First version fired
-//    on any settle-after-motion, including settling back to the SAME
-//    face; on hardware, a plain tap's own vibration was enough to cross
-//    is_moving's threshold, so pressing tap-to-pause was intermittently
-//    read as a full reset instead. Tracked via current_face_ (the
-//    confirmed face) and crossed_face_ (set the instant the quantized
-//    face differs from current_face_ while disturbed, cleared on
-//    settle). Boot is bootstrapped the same way: crossed_face_ starts
-//    true so the first settle after boot always creates a face.
+// 2. Reset (onExit/onEnter) fires only when, at rest, the quantized face
+//    disagrees with current_face_ (the confirmed face) — not on every
+//    is_moving blip. First version fired on any settle-after-motion,
+//    including settling back to the SAME face; on hardware, a plain tap's
+//    own vibration was enough to cross is_moving's threshold, so
+//    pressing tap-to-pause was intermittently read as a full reset
+//    instead. Fixed by comparing quantized to current_face_ directly
+//    instead of resetting unconditionally on every settle.
+//
+//    Second version (still buggy, fixed 2026-08-24) additionally required
+//    catching is_moving==true at some point before allowing the commit,
+//    on the theory that this would filter out spurious settle events.
+//    That extra gate was redundant — QuantizeFace's 80-degree hysteresis
+//    is already proof real movement happened — and it broke on a slow
+//    final correction across the boundary that never exceeded the
+//    is_moving gyro-rate threshold: the commit was gated behind a latch
+//    that only a fast-enough motion could set, so a gentle return to a
+//    face stayed stuck until some later unrelated fast flip happened to
+//    re-arm it. Now the commit condition just directly compares quantized
+//    to current_face_ every tick while at rest; no latch needed. Boot is
+//    bootstrapped via `!current_` (no face exists yet) rather than a
+//    separate "always commit once" flag.
 //
 // 3. Taps are forwarded unconditionally — NOT gated on is_moving (that
 //    was the first version's attempted fix for accidental tap-engine
@@ -50,10 +61,12 @@
 //    overwritten by onEnter()'s reset moments later if a genuine flip is
 //    confirmed anyway).
 //
-// 4. Face D has no defined behavior yet (plan: 待定，暫緩實作). Rather
-//    than a placeholder concrete TimerFace, `current_` is simply nullptr
-//    while on face D; Update()/OnTap() no-op in that case (brightness set
-//    to 0 — nothing to show). Revisit once D's functionality is decided.
+// 4. Face D has no defined behavior yet (plan: 待定，暫緩實作). Backed by
+//    ReservedFace (added 2026-08-24) — a placeholder TimerFace that just
+//    renders "Reserved" and no-ops everything else — so a flip to D is
+//    visible on screen instead of indistinguishable from current_ being
+//    null. Revisit once D's functionality is decided; `current_` is no
+//    longer expected to be null in normal operation.
 //
 // 5. Brightness/notification state machine (M7, plan's "亮度作為通知系
 //    統"), driven off TimerFace::Status polled each tick, edge-detected
@@ -94,9 +107,7 @@ private:
 
     GuiManager& gui_manager_;
     std::unique_ptr<TimerFace> current_;  // nullptr while on face D
-    Face current_face_ = Face::kA;         // confirmed face; meaningless until first settle
-    bool was_disturbed_ = true;            // starts true so boot's first settle is handled
-    bool crossed_face_ = true;             // starts true so boot's first settle creates a face
+    Face current_face_ = Face::kA;         // confirmed face; meaningless until current_ is set
 
     float brightness_ = 1.0f;
     uint32_t bright_phase_elapsed_ms_ = 0;  // ms since the last "became bright" event, drives the fade

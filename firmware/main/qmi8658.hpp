@@ -26,7 +26,7 @@ class Qmi8658 {
 public:
     struct Sample {
         float accel_g[3];    // X, Y, Z in units of g, +-8g range
-        float gyro_dps[3];   // X, Y, Z in degrees/sec, +-512dps range
+        float gyro_dps[3];   // X, Y, Z in degrees/sec, +-256dps range
     };
 
     enum class TapEvent { kNone, kSingle, kDouble };
@@ -56,14 +56,29 @@ public:
 
         // Sequence and register values match QMI8658_init() /
         // QMI8658_config_acc() / QMI8658_config_gyro() in the vendor demo:
-        // Ctrl1=0x60, Ctrl2 = accel +-8g @ 1000Hz, Ctrl3 = gyro +-512dps @
-        // 1000Hz, Ctrl5=0x00 (LPF/HPF off — the vendor code computes LPF
-        // bits but then unconditionally overwrites them with 0 before the
-        // write), Ctrl7 = enable accel+gyro.
+        // Ctrl1=0x60, Ctrl2 = accel +-8g @ 1000Hz, Ctrl5=0x00 (LPF/HPF off
+        // — the vendor code computes LPF bits but then unconditionally
+        // overwrites them with 0 before the write), Ctrl7 = enable
+        // accel+gyro.
         WriteReg(kRegCtrl1, 0x60);
         WriteReg(kRegCtrl2, 0x23);  // +-8g range, 1000Hz ODR
         WriteReg(kRegCtrl5, 0x00);
-        WriteReg(kRegCtrl3, 0x43);  // +-512dps range, 1000Hz ODR
+        // CTRL3 gFS<2:0> is bits[6:4] (QMI8658C datasheet Rev 0.6, Table
+        // 24, p.27): 000=16, 001=32, 010=64, 011=128, 100=256, 101=512,
+        // 110=1024, 111=2048 dps. 0x43 = 0100_0011 -> bits[6:4]=100 ->
+        // *256dps*. This was originally a bug (code assumed 512dps, see
+        // git history 2026-08-24) causing every dps reading to be 2x true
+        // value — but 256dps turns out to be the range we actually want:
+        // narrower range means more LSB/dps (128 here vs 64 at 512dps),
+        // so the same ADC noise floor converts to less dps noise, and
+        // typical desk-flip angular rates shouldn't approach 256dps
+        // anyway. Kept at 0x43 deliberately now, with kGyroLsbPerDps
+        // matching it below. Risk: a fast/hard flip that does exceed
+        // 256dps will clip instead of overshooting — the opposite
+        // failure mode (silent under-read instead of obvious overshoot,
+        // easy to miss) — revisit at M10 assembly-time tuning if that
+        // turns out to matter in practice; bits[3:0]=0011 (1000Hz ODR).
+        WriteReg(kRegCtrl3, 0x43);  // +-256dps range, 1000Hz ODR
         WriteReg(kRegCtrl5, 0x00);
         WriteReg(kRegCtrl7, 0x03);  // accel + gyro enable
     }
@@ -198,7 +213,7 @@ private:
     static constexpr uint8_t kCmdConfigureTap = 0x0C;
 
     static constexpr float kAccelLsbPerG = 4096.0f;   // +-8g range
-    static constexpr float kGyroLsbPerDps = 64.0f;    // +-512dps range
+    static constexpr float kGyroLsbPerDps = 128.0f;   // +-256dps range (32768/256)
 
     void WriteReg(uint8_t reg, uint8_t value)
     {

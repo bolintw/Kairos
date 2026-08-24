@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "pomodoro_face.hpp"
+#include "reserved_face.hpp"
 #include "stopwatch_face.hpp"
 
 namespace {
@@ -79,7 +80,7 @@ std::unique_ptr<TimerFace> AppController::CreateFace(Face face)
         case Face::kA: return std::make_unique<PomodoroFace>(kFocusMsA, kBreakMsA);
         case Face::kB: return std::make_unique<PomodoroFace>(kFocusMsB, kBreakMsB);
         case Face::kC: return std::make_unique<StopwatchFace>();
-        case Face::kD: return nullptr;  // no defined behavior yet
+        case Face::kD: return std::make_unique<ReservedFace>();  // debug placeholder, see design note 4
     }
     return nullptr;
 }
@@ -88,36 +89,36 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
 {
     const Face quantized = QuantizeFace(attitude.screen_angle_deg);
 
-    if (attitude.is_moving) {
-        was_disturbed_ = true;
-        if (quantized != current_face_) {
-            crossed_face_ = true;
+    // Commit as soon as we're at rest and quantized disagrees with the
+    // confirmed face (or there's no face yet, at boot) — see design note 2
+    // for why this doesn't need to also confirm is_moving was observed
+    // true at some point: QuantizeFace's 80-degree hysteresis already
+    // proves real movement happened, so gating on the instantaneous gyro
+    // threshold too was redundant, and broke on a slow final correction
+    // that crossed the boundary without ever exceeding that threshold —
+    // was_disturbed_ never latched, so the commit below never ran, even
+    // though quantized was already correct.
+    if (!attitude.is_moving && (!current_ || quantized != current_face_)) {
+        if (current_) {
+            current_->onExit();
         }
-    } else if (was_disturbed_) {
-        if (crossed_face_) {
-            if (current_) {
-                current_->onExit();
-            }
-            current_face_ = quantized;
-            current_ = CreateFace(current_face_);
-            if (current_) {
-                current_->onEnter();
-            }
+        current_face_ = quantized;
+        current_ = CreateFace(current_face_);
+        if (current_) {
+            current_->onEnter();
+        }
 
-            // A flip should always read as an obvious bright event,
-            // regardless of edge detection below (the new face always
-            // starts paused, so is_running true->false/false->true
-            // wouldn't reliably fire "just became bright" on its own —
-            // see design note 5).
-            brightness_ = 1.0f;
-            bright_phase_elapsed_ms_ = 0;
-            paused_elapsed_ms_ = 0;
-            prev_is_running_ = false;
-            prev_has_target_ = false;
-            prev_remaining_ms_ = 0;
-        }
-        was_disturbed_ = false;
-        crossed_face_ = false;
+        // A flip should always read as an obvious bright event,
+        // regardless of edge detection below (the new face always
+        // starts paused, so is_running true->false/false->true
+        // wouldn't reliably fire "just became bright" on its own —
+        // see design note 5).
+        brightness_ = 1.0f;
+        bright_phase_elapsed_ms_ = 0;
+        paused_elapsed_ms_ = 0;
+        prev_is_running_ = false;
+        prev_has_target_ = false;
+        prev_remaining_ms_ = 0;
     }
 
     if (current_) {

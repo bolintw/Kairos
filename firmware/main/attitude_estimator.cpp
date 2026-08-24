@@ -12,22 +12,17 @@ constexpr float kRadToDeg = 180.0f / kPi;
 // overlay and re-flashing.
 constexpr float kGyroMovingThresholdDps = 20.0f;
 constexpr float kAzInvalidThresholdG = 0.3f;
-// Lowered from 0.98, then back up from 0.5 (2026-08-23). At 0.98,
-// correcting a settle-time error back to accel-derived truth takes
-// ln(0.1)/ln(0.98) =~ 114 ticks (~17s at the 150ms sensor period) to
-// close 90% of the gap — matched the "十幾秒" convergence observed on
-// hardware exactly, and was actively causing misclassified flips since
-// AppController reads the angle right at the settle moment. 0.5 fixed
-// that (~3 ticks, ~0.5s) but felt too accel-dominant on hardware
-// (sensitive to vibration/jitter). 0.8 is a middle ground: ~10 ticks
-// (~1.5s) to close 90% of a settle-time error, still far faster than
-// 0.98's 17s, while trusting gyro more tick-to-tick than 0.5 did.
-// 0.8 means 80% gyro / 20% accel per tick — still gyro-dominant, not
-// accel-dominant (worth spelling out: easy to misread "0.8" as "close to
-// accel" if recalling a convention where the number labels the other
-// sensor). Gyro overshoot/bias will still show through strongly at this
-// weighting; that's expected until gyro is properly calibrated (M8).
-constexpr float kComplementaryAlpha = 0.8f;  // weight on gyro-integrated angle
+// History: 0.98 -> 0.5 -> 0.8 -> 0.95 -> 0.9 (2026-08-24, final for now).
+// 0.98 took ~17s to converge (matched the "十幾秒" hardware report). 0.5
+// converged fast (~0.5s) but felt too accel-dominant/vibration-sensitive.
+// 0.8 was a middle ground (~1.5s). Once the gyro full-scale-range bug was
+// fixed (CTRL3 scale now correctly matches +-256dps, see qmi8658.hpp),
+// the overshoot that motivated trusting accel more went away, and 0.95
+// felt close to the user's prior flight-controller tuning experience —
+// but tuned down slightly to 0.9 on further hardware testing, still
+// gyro-dominant (90% gyro / 10% accel per tick) but with a touch more
+// accel correction than 0.95.
+constexpr float kComplementaryAlpha = 0.9f;  // weight on gyro-integrated angle
 
 float WrapDeg180(float deg)
 {

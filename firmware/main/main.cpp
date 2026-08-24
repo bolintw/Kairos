@@ -1,15 +1,19 @@
 #include <cstdio>
 
+#include "driver/gpio.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "nvs_flash.h"
 
 #include "app_controller.hpp"
 #include "attitude_estimator.hpp"
+#include "calibration_mode.hpp"
 #include "gui_manager.hpp"
 #include "i2c_scan.hpp"
 #include "lgfx_config.hpp"
+#include "nvs_calibration.hpp"
 #include "qmi8658.hpp"
 
 namespace {
@@ -22,6 +26,10 @@ constexpr int64_t kSensorUpdatePeriodUs = 150 * 1000;  // readable, not maxed ou
 // label at the top) without deleting the code — flip back on when
 // debugging attitude/tap behavior again.
 constexpr bool kDebugOverlayEnabled = true;
+
+// Hold BOOT (GPIO0) this long, while the app is already running, to enter
+// calibration mode. NOT checked at power-on/reset — see calibration_mode.hpp.
+constexpr int64_t kCalibrationHoldUs = 3 * 1000 * 1000;
 
 static LGFX lcd;
 static uint8_t lvgl_draw_buf[240 * kDrawBufRows * 2];  // RGB565, 2 bytes/px
@@ -87,6 +95,30 @@ AttitudeEstimator::Sample ToAttitudeSample(const Qmi8658::Sample& s)
 extern "C" void app_main(void)
 {
     printf("Kairos gravity timer — hello from C++\n");
+
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_err = nvs_flash_init();
+    }
+    if (nvs_err != ESP_OK) {
+        printf("nvs_flash_init failed: %d\n", nvs_err);
+    }
+
+    CalibrationData calibration;
+    if (!LoadCalibration(calibration)) {
+        printf("No saved calibration — using uncalibrated defaults until "
+               "RunCalibrationMode() is run once (hold BOOT ~3s)\n");
+    }
+
+    // GPIO0 (BOOT) as a normal input once past the ROM bootloader's
+    // strapping check — see calibration_mode.hpp for why this is only
+    // polled here, not checked at reset.
+    gpio_config_t boot_btn_cfg = {};
+    boot_btn_cfg.pin_bit_mask = 1ULL << GPIO_NUM_0;
+    boot_btn_cfg.mode = GPIO_MODE_INPUT;
+    boot_btn_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    gpio_config(&boot_btn_cfg);
 
     lcd.init();
     lcd.setBrightness(255);  // full bright at boot; AppController takes over from here
@@ -157,21 +189,37 @@ extern "C" void app_main(void)
     // no physical tap). Discard it here so the count starts clean.
     (void)imu.PollTapEvent();
 
-    static AttitudeEstimator attitude_estimator;
+    static AttitudeEstimator attitude_estimator(calibration.face_a_offset_deg);
     {
-        // Assumes the device is stationary at boot, per
-        // CalibrateGyroZeroOffset()'s documented contract.
-        Qmi8658::Sample boot_sample;
-        if (imu.Read(boot_sample)) {
-            attitude_estimator.CalibrateGyroZeroOffset(ToAttitudeSample(boot_sample));
-        }
+        // Gyro bias comes from the saved calibration (see
+        // RunCalibrationMode), not a fresh live read here: this device
+        // has no real power-cycle in normal use (battery + deep sleep),
+        // and any wake is tap-triggered, so "assume stationary right
+        // now" doesn't hold reliably enough for a live measurement.
+        AttitudeEstimator::Sample bias_sample{};
+        bias_sample.gyro_dps[0] = calibration.gyro_bias_dps[0];
+        bias_sample.gyro_dps[1] = calibration.gyro_bias_dps[1];
+        bias_sample.gyro_dps[2] = calibration.gyro_bias_dps[2];
+        attitude_estimator.CalibrateGyroZeroOffset(bias_sample);
     }
 
     int64_t next_sensor_update_us = 0;
     int64_t last_sensor_update_us = esp_timer_get_time();
+    int64_t boot_button_press_start_us = 0;
     int tap_count = 0;
 
     while (true) {
+        if (gpio_get_level(GPIO_NUM_0) == 0) {
+            const int64_t now_us_btn = esp_timer_get_time();
+            if (boot_button_press_start_us == 0) {
+                boot_button_press_start_us = now_us_btn;
+            } else if (now_us_btn - boot_button_press_start_us >= kCalibrationHoldUs) {
+                RunCalibrationMode(imu, gui_manager);  // never returns — ends in esp_restart()
+            }
+        } else {
+            boot_button_press_start_us = 0;
+        }
+
         if (imu.PollTapEvent() != Qmi8658::TapEvent::kNone) {
             ++tap_count;
             app_controller.OnTap();
