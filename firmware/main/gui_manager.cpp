@@ -1,5 +1,7 @@
 #include "gui_manager.hpp"
 
+#include <cstring>
+
 namespace {
 float Clamp01(float v)
 {
@@ -42,7 +44,13 @@ GuiManager::GuiManager(LGFX& lcd)
 
 void GuiManager::SetPrimaryText(const char* text)
 {
+    if (std::strncmp(last_text_, text, sizeof(last_text_)) == 0) {
+        return;  // unchanged — see the field comment in gui_manager.hpp
+    }
+    std::strncpy(last_text_, text, sizeof(last_text_) - 1);
+    last_text_[sizeof(last_text_) - 1] = '\0';
     lv_label_set_text(label_, text);
+    ++update_count_;
 }
 
 void GuiManager::SetBrightness(float brightness)
@@ -67,5 +75,11 @@ void GuiManager::SetWarmth(float warmth)
 void GuiManager::SetRotationDeg(float screen_angle_deg)
 {
     const int32_t rot_0p1_deg = static_cast<int32_t>(kRotationSign * screen_angle_deg * 10.0f);
+    if (has_last_rotation_ && rot_0p1_deg == last_rotation_0p1_deg_) {
+        return;  // unchanged (in the 0.1-degree units LVGL sees) — see gui_manager.hpp
+    }
+    last_rotation_0p1_deg_ = rot_0p1_deg;
+    has_last_rotation_ = true;
     lv_obj_set_style_transform_rotation(root_, rot_0p1_deg, 0);
+    ++update_count_;
 }

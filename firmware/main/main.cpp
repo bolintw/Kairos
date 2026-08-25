@@ -221,13 +221,42 @@ extern "C" void app_main(void)
         bias_sample.gyro_dps[2] = calibration.gyro_bias_dps[2];
         attitude_estimator.CalibrateGyroZeroOffset(bias_sample);
     }
+    {
+        // Seed angle_deg_ from a real reading instead of leaving it at
+        // 0.0f — without this, booting anywhere other than face A's
+        // reference orientation (e.g. plugged in via USB-C while resting
+        // on face D) starts a full-size error that only closes at the
+        // complementary filter's normal per-tick rate, visible as
+        // "takes a moment to reach the right angle" right after flashing.
+        Qmi8658::Sample seed_sample;
+        if (imu.Read(seed_sample)) {
+            attitude_estimator.SeedInitialAngle(ToAttitudeSample(seed_sample));
+        }
+    }
 
     int64_t next_sensor_update_us = 0;
     int64_t last_sensor_update_us = esp_timer_get_time();
     int64_t boot_button_press_start_us = 0;
     int tap_count = 0;
 
+    int64_t last_fps_calc_us = esp_timer_get_time();
+    uint32_t fps_display = 0;
+    uint32_t last_update_count = 0;
+
     while (true) {
+        const int64_t now_fps_us = esp_timer_get_time();
+        if (now_fps_us - last_fps_calc_us >= 1000000) {
+            // GuiManager's own real-update count, not a physical flush
+            // count — root_ (200x60) needs ~3 flush calls per logical
+            // redraw in LVGL's partial render mode (draw buffer only
+            // fits ~24 rows at that width), so counting flushes directly
+            // would overstate the real update rate by ~3x.
+            const uint32_t update_count = gui_manager.GetUpdateCount();
+            fps_display = update_count - last_update_count;
+            last_update_count = update_count;
+            last_fps_calc_us = now_fps_us;
+        }
+
         if (gpio_get_level(GPIO_NUM_0) == 0) {
             const int64_t now_us_btn = esp_timer_get_time();
             if (boot_button_press_start_us == 0) {
@@ -270,9 +299,10 @@ extern "C" void app_main(void)
 
                 if (label) {
                     const FixedParts angle = SplitFixed(RoundToFixed(attitude.screen_angle_deg, 10), 10);
-                    lv_label_set_text_fmt(label, "Ang %c%d.%01d  Taps %d  Mv%d",
+                    lv_label_set_text_fmt(label, "Ang %c%d.%01d  Taps %d\nMv%d  FPS%u",
                         angle.sign, angle.whole, angle.frac,
-                        tap_count, attitude.is_moving ? 1 : 0);
+                        tap_count, attitude.is_moving ? 1 : 0,
+                        static_cast<unsigned int>(fps_display));
                 }
             } else if (label) {
                 lv_label_set_text(label, "IMU read failed");

@@ -121,6 +121,19 @@
 //    TimerFace never sees any of this — GetStatus() is facts only;
 //    AttitudeEstimator likewise has no notion of brightness.
 //
+// 6. Tap mute window (2026-08-25): OnTap() is ignored for
+//    kTapMuteAfterSwitchMs after a face switch commits — the user found
+//    a flip often lands with enough residual wobble/vibration to trip
+//    the tap engine an instant later, immediately starting the timer on
+//    a face they just arrived at (expected to get worse once the device
+//    is inside an enclosure, more surface area to knock). tap_mute_
+//    remaining_ms_ is armed to the window length on every face commit
+//    and counted down every tick; OnTap() no-ops while it's nonzero.
+//    Deliberately app-level and orthogonal to the tap engine's own
+//    internal detection windows (peak_window/tap_window/d_tap_window in
+//    main.cpp's ConfigureTap call) — those shape what counts as a tap at
+//    all, this just ignores genuine taps for a moment after a flip.
+//
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
 // double-integrating the gyro angle) and passes the resulting Output in.
@@ -134,7 +147,8 @@ public:
     // elapsed time since the previous call.
     void Update(const AttitudeEstimator::Output& attitude, uint32_t dt_ms);
 
-    // Call when the tap engine reports a new tap.
+    // Call when the tap engine reports a new tap. Ignored for a short
+    // window right after a face switch — see design note 6.
     void OnTap();
 
 private:
@@ -152,4 +166,6 @@ private:
     bool prev_is_running_ = false;
     bool prev_has_target_ = false;
     uint32_t prev_remaining_ms_ = 0;
+
+    uint32_t tap_mute_remaining_ms_ = 0;  // see design note 6
 };

@@ -38,6 +38,11 @@ constexpr uint32_t kFocusEndRampWindowMs = 30 * 1000;
 constexpr uint32_t kFocusEndRampMs = 3 * 1000;
 constexpr uint32_t kLongIdleTimeoutMs = 5 * 60 * 1000;  // minutes-scale, paused-only, backlight off
 
+// See app_controller.hpp design note 6 — window after a face switch
+// during which a tap is ignored, absorbing flip-induced tap-engine
+// false triggers instead of letting them immediately start the timer.
+constexpr uint32_t kTapMuteAfterSwitchMs = 1000;
+
 float FaceCenterDeg(AppController::Face face)
 {
     switch (face) {
@@ -141,6 +146,12 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
         prev_is_running_ = false;
         prev_has_target_ = false;
         prev_remaining_ms_ = 0;
+
+        // See design note 6: absorb flip-induced tap-engine false
+        // triggers instead of letting them start the timer immediately.
+        tap_mute_remaining_ms_ = kTapMuteAfterSwitchMs;
+    } else if (tap_mute_remaining_ms_ > 0) {
+        tap_mute_remaining_ms_ = dt_ms < tap_mute_remaining_ms_ ? tap_mute_remaining_ms_ - dt_ms : 0;
     }
 
     if (current_) {
@@ -221,6 +232,9 @@ void AppController::UpdateBrightness(uint32_t dt_ms, bool is_moving)
 
 void AppController::OnTap()
 {
+    if (tap_mute_remaining_ms_ > 0) {
+        return;  // see design note 6 — absorbing a flip's residual vibration
+    }
     if (current_) {
         current_->onTap();
     }

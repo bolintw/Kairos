@@ -92,7 +92,35 @@ public:
     // straight from the estimator, no filtering applied here.
     void SetRotationDeg(float screen_angle_deg);
 
+    // Counts real LVGL updates (SetPrimaryText/SetRotationDeg calls that
+    // weren't skipped by the value-unchanged check below) — for a debug
+    // fps readout. Deliberately NOT a count of lvgl_flush_cb calls: root_
+    // is taller than one draw-buffer chunk (200x60 vs the ~24-row chunk
+    // size for that width), so LVGL's partial-mode redraw splits a single
+    // logical update into ~3 flush calls — counting those directly
+    // overstates the real update rate by that factor (confirmed on
+    // hardware 2026-08-25: a stationary mount still showed ~90-something
+    // "fps" from sensor noise crossing the 0.1-degree rotation threshold,
+    // which was actually ~30 real updates/sec, 3x-inflated).
+    uint32_t GetUpdateCount() const { return update_count_; }
+
 private:
+    // SetPrimaryText/SetRotationDeg are called every sensor tick (120Hz)
+    // regardless of whether the value actually changed — but
+    // lv_label_set_text() has no same-text check of its own (always
+    // reallocates + marks dirty, see lv_label.c), and a style setter
+    // called with an unchanged value still invalidates. Left unguarded,
+    // that's 120 redraws/sec even while the displayed second and angle
+    // are both holding still (e.g. paused, or resting stationary) — most
+    // of the battery cost this was meant to avoid. Comparing against the
+    // last value here (2026-08-25) means a redraw only actually happens
+    // when something visibly changed: ticking seconds settle to ~1
+    // redraw/sec on their own, a stationary angle settles to ~0.
+    char last_text_[32] = "";
+    int32_t last_rotation_0p1_deg_ = 0;
+    bool has_last_rotation_ = false;
+    uint32_t update_count_ = 0;
+
     LGFX& lcd_;
     lv_obj_t* root_;
     lv_obj_t* label_;

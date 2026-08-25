@@ -108,8 +108,33 @@ public:
     // measure gyro bias; Update() subtracts it from all future samples.
     void CalibrateGyroZeroOffset(const Sample& stationary_sample);
 
+    // Call once at boot, before the first Update(), with a fresh sample —
+    // sets angle_deg_ directly from this sample's accel-derived angle
+    // instead of leaving it at the 0.0f default. Without this, a boot
+    // anywhere other than face A's reference orientation (e.g. plugged in
+    // via USB-C while resting on face D) starts a full-size error that
+    // the complementary filter then has to walk down at its normal
+    // per-tick rate, same as any other correction — visible as "takes a
+    // moment to reach the right angle" right after flashing. A no-op if
+    // the sample isn't in the valid plane (see Output::in_valid_plane);
+    // Update() will fall back to converging normally in that edge case.
+    void SeedInitialAngle(const Sample& sample);
+
 private:
     float face_a_offset_deg_;
     float gyro_bias_dps_[3] = {0.0f, 0.0f, 0.0f};
     float angle_deg_ = 0.0f;  // last output angle, already offset-corrected
+
+    // Single-pole low-pass on the raw accel/gyro samples, applied before
+    // anything else in Update() (2026-08-25, the plan's long-deferred
+    // "一階濾波" idea — see git history for why it was put off until
+    // real jitter was measured on hardware). Standard EMA:
+    // x = new_x*kLowPassAlpha + x*(1-kLowPassAlpha), seeded from the
+    // first real sample (has_filtered_sample_) rather than 0 so there's
+    // no startup transient. A separate alpha from kComplementaryAlpha —
+    // this smooths the raw inputs, that blends gyro-integration against
+    // accel for the output angle; don't confuse the two.
+    float filtered_accel_g_[3] = {0.0f, 0.0f, 0.0f};
+    float filtered_gyro_dps_[3] = {0.0f, 0.0f, 0.0f};
+    bool has_filtered_sample_ = false;
 };
