@@ -20,7 +20,22 @@ namespace {
 
 constexpr int kLvglTickPeriodMs = 5;
 constexpr int kDrawBufRows = 20;  // partial buffer: 20 rows of the 240-wide panel
-constexpr int64_t kSensorUpdatePeriodUs = 150 * 1000;  // readable, not maxed out
+// 150ms -> 30ms -> 120Hz (2026-08-25): raised again so a future low-pass
+// filter on the raw gyro/accel samples has real headroom above both the
+// display's ~60fps redraw cap and its own filter bandwidth — sampling
+// faster than what you filter/display is the sane order, not the other
+// way round. QMI8658's own ODR is 1000Hz (see qmi8658.hpp), and the I2C
+// read itself (~13 bytes @ 400kHz) is well under a millisecond, so 120Hz
+// polling has plenty of room in the 5ms main-loop cadence. dt_ms-based
+// timing elsewhere (AttitudeEstimator, AppController) is unaffected by
+// the rate itself, just gets finer-grained inputs — EXCEPT the
+// complementary filter's alpha: BlendTowardAngle() absorbs a fixed
+// *fraction* of the gyro/accel gap per call, not per unit time, so more
+// calls/sec at the same alpha=0.9 means faster real-time convergence
+// toward the accel reading than what 0.9 was tuned to feel like at the
+// old 30ms rate. Worth re-checking the settle "feel" on hardware after
+// this change — may want to nudge alpha up to compensate.
+constexpr int64_t kSensorUpdatePeriodUs = 1000000 / 120;  // ~120Hz
 
 // Flip to false to hide the debug overlay entirely (angle/taps/is_moving
 // label at the top) without deleting the code — flip back on when
@@ -154,6 +169,18 @@ extern "C" void app_main(void)
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), 0);
     lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
 
+    printf("LVGL running\n");
+
+    // M6: AppController owns attitude-driven face switching (via
+    // AttitudeEstimator::Output, computed below) plus tap routing and
+    // TimerFace lifecycle. See app_controller.hpp for the design.
+    static GuiManager gui_manager(lcd);
+    static AppController app_controller(gui_manager);
+
+    // Deliberately NOT rotating with the primary label (see
+    // gui_manager.hpp's screen counter-rotation note) — stays a plain
+    // fixed child of lv_screen_active() for now, after the fully-rotating
+    // version crashed twice on hardware.
     lv_obj_t* label = nullptr;
     if (kDebugOverlayEnabled) {
         label = lv_label_create(lv_screen_active());
@@ -163,14 +190,6 @@ extern "C" void app_main(void)
         lv_label_set_text(label, "waiting for IMU...");
         lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 30);
     }
-
-    printf("LVGL running\n");
-
-    // M6: AppController owns attitude-driven face switching (via
-    // AttitudeEstimator::Output, computed below) plus tap routing and
-    // TimerFace lifecycle. See app_controller.hpp for the design.
-    static GuiManager gui_manager(lcd);
-    static AppController app_controller(gui_manager);
 
     // M3/M4 debug overlay: raw accel/gyro readout plus tap count.
     static Qmi8658 imu(GPIO_NUM_6, GPIO_NUM_7);
@@ -242,6 +261,10 @@ extern "C" void app_main(void)
             if (imu.Read(sample)) {
                 const AttitudeEstimator::Output attitude =
                     attitude_estimator.Update(ToAttitudeSample(sample), sensor_dt_ms);
+
+                // Raw screen_angle_deg for now, no filtering — revisit
+                // with a simple low-pass if it looks jittery on hardware.
+                gui_manager.SetRotationDeg(attitude.screen_angle_deg);
 
                 app_controller.Update(attitude, sensor_dt_ms);
 
