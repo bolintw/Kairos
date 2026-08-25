@@ -4,6 +4,11 @@
 # nested local-only repo, never tracked/pushed by the outer repo
 reference/private/
 
+# vendor material (Waveshare's own schematic/wiki) — kept locally for our
+# own reference, not ours to redistribute; see README.md for links to the
+# originals instead
+reference/vendor/
+
 # ESP-IDF build artifacts
 firmware/build/
 firmware/sdkconfig.old
