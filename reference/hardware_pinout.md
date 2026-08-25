@@ -20,7 +20,7 @@
 | I2C_SCL | 7 | |
 | IMU_INT1 | 47 | |
 | IMU_INT2 | 48 | |
-| Battery ADC | 1 | 分壓 200K:100K，電壓 = 3.3/4096×3×AD_Value |
+| Battery ADC | 1 | 分壓 R4=R7=100K（1:1），電壓 = 3.3/4096×2×AD_Value；R7 並聯 C13 100nF 做濾波（2026-08-25 直接對照 schematic 修正，原先誤植為 200K:100K/×3） |
 | BOOT0 | 0 | |
 | UART_TXD / UART_RXD | 43 / 44 | 經 CH343P 轉 USB，燒錄與 log 用，不需自行接線 |
 
