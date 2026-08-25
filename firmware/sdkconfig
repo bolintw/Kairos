@@ -3949,7 +3949,7 @@ CONFIG_LV_FONT_MONTSERRAT_14=y
 # default:
 # CONFIG_LV_FONT_MONTSERRAT_30 is not set
 # default:
-CONFIG_LV_FONT_MONTSERRAT_32=y
+# CONFIG_LV_FONT_MONTSERRAT_32 is not set
 # default:
 # CONFIG_LV_FONT_MONTSERRAT_34 is not set
 # default:

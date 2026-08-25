@@ -40,6 +40,21 @@ GuiManager::GuiManager(LGFX& lcd)
     // channel comes back, but this baseline can't depend on it being
     // called at all.
     lv_obj_set_style_text_color(label_, lv_color_white(), 0);
+
+    // Plain static circle, no rotation — see the kRingRadiusPx/kRingWidthPx
+    // comment in gui_manager.hpp for why this is safe to make full-size
+    // unlike root_. Centered the same way as root_ (pivot math doesn't
+    // matter here since it never transforms, but centering the object
+    // itself on the panel does).
+    ring_ = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(ring_);
+    lv_obj_set_size(ring_, kRingRadiusPx * 2, kRingRadiusPx * 2);
+    lv_obj_set_pos(ring_, (kPanelSizePx - kRingRadiusPx * 2) / 2, (kPanelSizePx - kRingRadiusPx * 2) / 2);
+    lv_obj_set_style_radius(ring_, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(ring_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ring_, kRingWidthPx, 0);
+    lv_obj_set_style_border_color(ring_, lv_color_white(), 0);
+    lv_obj_set_style_border_opa(ring_, LV_OPA_TRANSP, 0);
 }
 
 void GuiManager::SetPrimaryText(const char* text)
@@ -70,6 +85,23 @@ void GuiManager::SetWarmth(float warmth)
     const uint8_t g = static_cast<uint8_t>(255.0f + w * (kWarmG - 255));
     const uint8_t b = static_cast<uint8_t>(255.0f + w * (kWarmB - 255));
     lv_obj_set_style_text_color(label_, lv_color_make(r, g, b), 0);
+}
+
+void GuiManager::SetAccentColor(lv_color_t color)
+{
+    lv_obj_set_style_text_color(label_, color, 0);
+    lv_obj_set_style_border_color(ring_, color, 0);
+}
+
+void GuiManager::SetRingOpacity(uint8_t opa)
+{
+    if (has_last_ring_opa_ && opa == last_ring_opa_) {
+        return;  // unchanged — same reasoning as SetPrimaryText's dirty-check
+    }
+    last_ring_opa_ = opa;
+    has_last_ring_opa_ = true;
+    lv_obj_set_style_border_opa(ring_, opa, 0);
+    ++update_count_;
 }
 
 void GuiManager::SetRotationDeg(float screen_angle_deg)

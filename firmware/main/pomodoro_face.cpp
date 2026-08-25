@@ -4,6 +4,15 @@
 
 #include "gui_manager.hpp"
 
+namespace {
+// Accent colors (2026-08-25 "UI 調整" pass): focus=red, break=green — the
+// primary text dropped its "Focus"/"Break" word prefix in favor of color
+// alone carrying that distinction, applied to both the label and the
+// outer ring via GuiManager::SetAccentColor().
+const lv_color_t kColorFocus = lv_color_make(255, 60, 60);
+const lv_color_t kColorBreak = lv_color_make(35, 150, 65);  // darker than the initial pick, 2026-08-25
+}  // namespace
+
 PomodoroFace::PomodoroFace(uint32_t focus_ms, uint32_t break_ms)
     : focus_ms_(focus_ms), break_ms_(break_ms)
 {
@@ -60,10 +69,10 @@ void PomodoroFace::render(GuiManager& gui)
     const uint32_t seconds = total_seconds % 60;
 
     char buf[24];
-    std::snprintf(buf, sizeof(buf), "%s %02u:%02u",
-                   phase_ == Phase::kFocus ? "Focus" : "Break",
+    std::snprintf(buf, sizeof(buf), "%02u:%02u",
                    static_cast<unsigned int>(minutes), static_cast<unsigned int>(seconds));
     gui.SetPrimaryText(buf);
+    gui.SetAccentColor(phase_ == Phase::kFocus ? kColorFocus : kColorBreak);
 }
 
 TimerFace::Status PomodoroFace::GetStatus() const

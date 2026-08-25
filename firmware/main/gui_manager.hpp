@@ -3,15 +3,48 @@
 #include "lgfx_config.hpp"
 #include "lvgl.h"
 
-// Font for the primary timer display, pulled out so it's a one-line
-// change to try a different size/family while tuning layout. Note: LVGL
-// only compiles in font sizes enabled via menuconfig
-// (CONFIG_LV_FONT_MONTSERRAT_*, in sdkconfig) — swapping this to a size
-// that isn't enabled there needs that turned on too.
-constexpr const lv_font_t* kPrimaryFont = &lv_font_montserrat_32;
+// Space Grotesk Bold, 40px, digits+colon only (2026-08-25 "UI 調整" pass
+// — LVGL's built-in Montserrat has no bold weight and was judged not
+// elegant enough for the primary display). Generated via lv_font_conv
+// from reference/vendor/fonts/SpaceGrotesk-Bold.ttf — SIL OFL 1.1,
+// Copyright 2020 The Space Grotesk Project Authors; license text tracked
+// alongside the generated font source at SpaceGrotesk-OFL.txt (kept
+// in-tree, unlike reference/vendor/ which is gitignored, since the OFL
+// requires the license to travel with any distributed copy of the font,
+// including this subsetted embedded form). Glyph range restricted to
+// "0123456789:" since that's all the primary label ever shows — keeps
+// the generated font_space_grotesk_bold_40.c small instead of embedding
+// a full Latin charset. --no-compress is required: lv_font_conv's default
+// RLE-compressed glyph format needs CONFIG_LV_USE_FONT_COMPRESSED, which
+// this build doesn't enable — compressed glyphs silently rendered as
+// nothing (2026-08-25, caught on real hardware: ring/debug overlay both
+// fine, primary digits just invisible). Regenerate (all one command,
+// wrapped here only for line length) with: npx lv_font_conv --font
+// reference/vendor/fonts/SpaceGrotesk-Bold.ttf --size 40 --bpp 4
+// --format lvgl --no-compress --symbols "0123456789:" --lv-font-name
+// font_space_grotesk_bold_40 -o firmware/main/font_space_grotesk_bold_40.c
+// if the size/weight/character set ever needs to change — then edit the
+// generated file's top #include block to a plain `#include "lvgl.h"`
+// (see the comment left in font_space_grotesk_bold_40.c for why: the
+// tool's default ifdef only resolves correctly from inside the lvgl
+// component tree, not from main/).
+extern "C" const lv_font_t font_space_grotesk_bold_40;
+constexpr const lv_font_t* kPrimaryFont = &font_space_grotesk_bold_40;
 
 // Panel is 240x240 (see lgfx_config.hpp / main.cpp's lv_display_create).
 constexpr int32_t kPanelSizePx = 240;
+
+// Outer ring (2026-08-25, "UI 調整" pass): a plain circular border, shown
+// while paused / near a phase's end, hidden while running mid-phase — see
+// AppController's UpdateRing() for the actual show/hide/blink policy, this
+// is just the geometry. Sized close to the panel edge with a bit of
+// margin so it doesn't get clipped. Unlike root_ above, ring_ does NOT
+// need to counter-rotate — a circle is rotationally symmetric, so it's a
+// plain static lv_obj on lv_screen_active(), not a root_ child, and never
+// touches the transform/matrix code path that caused the three rotation
+// crashes documented below.
+constexpr int32_t kRingRadiusPx = 112;
+constexpr int32_t kRingWidthPx = 6;
 
 // Size of root_, the rotating container around the primary label — NOT
 // the full panel. See the design note below for why: a full 240x240
@@ -86,6 +119,26 @@ public:
     // and sufficient for a single-color text label.
     void SetWarmth(float warmth);
 
+    // Accent color (2026-08-25): sets BOTH the primary label's text color
+    // and the outer ring's border color to the same value — TimerFace
+    // subclasses call this from render() to communicate face/phase
+    // identity (focus=red, break=green, count-up=blue) now that the
+    // primary text itself is numbers-only. Independent of SetWarmth()
+    // above (still unused, kept in case a separate tint channel comes
+    // back) and independent of SetBrightness() (backlight PWM, not pixel
+    // color — the two never fight).
+    void SetAccentColor(lv_color_t color);
+
+    // Sets the outer ring's border opacity, 0 (invisible) to 255 (fully
+    // opaque) — see AppController::UpdateRing() for the policy (paused /
+    // near-phase-end solid / last-5s breathing). A single continuous
+    // control rather than a visible/hidden toggle so the last-5s "breathe"
+    // (2026-08-25, replaced a hard on/off blink the user found too
+    // harsh) can drive it as a smooth sine wave instead of a snap.
+    // Geometry (radius/width) is fixed at compile time via
+    // kRingRadiusPx/kRingWidthPx above.
+    void SetRingOpacity(uint8_t opa);
+
     // Counter-rotates the primary label's small root_ container (see
     // class doc) so it stays upright as the physical device rotates.
     // screen_angle_deg: AttitudeEstimator::Output::screen_angle_deg,
@@ -119,9 +172,12 @@ private:
     char last_text_[32] = "";
     int32_t last_rotation_0p1_deg_ = 0;
     bool has_last_rotation_ = false;
+    uint8_t last_ring_opa_ = 0;
+    bool has_last_ring_opa_ = false;
     uint32_t update_count_ = 0;
 
     LGFX& lcd_;
     lv_obj_t* root_;
     lv_obj_t* label_;
+    lv_obj_t* ring_;
 };

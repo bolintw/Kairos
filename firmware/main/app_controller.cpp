@@ -18,7 +18,7 @@ constexpr uint32_t kBreakMsB = 10 * 60 * 1000;
 // minute phase. D's real behavior is still undecided (see CreateFace) —
 // swap back to ReservedFace once done testing.
 constexpr uint32_t kFocusMsD = 60 * 1000;  // 1:00
-constexpr uint32_t kBreakMsD = 30 * 1000;  // 0:30
+constexpr uint32_t kBreakMsD = 40 * 1000;  // 0:40
 
 // See app_controller.hpp's design note 1 for why this single value
 // produces both the leave and return bands by itself (leave at this
@@ -57,6 +57,25 @@ constexpr uint32_t kLongIdleTimeoutMs = 5 * 60 * 1000;  // minutes-scale, paused
 // consistently applies from the moment it's needed, so 500 is back to a
 // shorter, less sluggish-feeling value.
 constexpr uint32_t kTapMuteAfterSwitchMs = 500;
+
+// See app_controller.hpp design note 7 — outer ring show/breathe windows.
+// In whole seconds, not ms: the primary label displays
+// remaining_ms/1000 (truncated), so a "30" displayed second actually
+// spans remaining_ms in [30000, 30999] — comparing against a flat 30000ms
+// threshold turned the ring on only for the last 1ms of that second,
+// which read as the ring lagging a full second behind the digits (caught
+// on hardware, 2026-08-25: "上一版準時亮起，這次變成29秒才亮"). Comparing
+// truncated seconds directly instead keeps the ring in sync with
+// whichever second is actually on screen.
+constexpr uint32_t kRingShowWindowSec = 30;
+constexpr uint32_t kRingBreathWindowSec = 5;
+// A hard on/off blink (2026-08-25 first version) read as too harsh on
+// hardware — replaced same day with a smooth breathing fade between this
+// floor and full opacity, one full cycle per kRingBreathPeriodMs. Floor
+// kept well above 0 so the ring never fully disappears mid-breath, unlike
+// the old blink's flat-off half.
+constexpr uint32_t kRingBreathPeriodMs = 1000;
+constexpr uint8_t kRingBreathFloorOpa = 60;
 
 float FaceCenterDeg(AppController::Face face)
 {
@@ -179,6 +198,7 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
         current_->onTick(dt_ms);
     }
     UpdateBrightness(dt_ms, attitude.is_moving);
+    UpdateRing();
     if (current_) {
         current_->render(gui_manager_);
     }
@@ -249,6 +269,47 @@ void AppController::UpdateBrightness(uint32_t dt_ms, bool is_moving)
     prev_is_running_ = status.is_running;
     prev_has_target_ = status.has_target;
     prev_remaining_ms_ = status.remaining_ms;
+}
+
+void AppController::UpdateRing()
+{
+    if (!current_) {
+        gui_manager_.SetRingOpacity(0);
+        return;
+    }
+
+    const TimerFace::Status status = current_->GetStatus();
+
+    if (!status.is_running) {
+        gui_manager_.SetRingOpacity(255);  // paused
+        return;
+    }
+    if (!status.has_target) {
+        gui_manager_.SetRingOpacity(0);  // running, no phase end to signal (count-up)
+        return;
+    }
+    const uint32_t seconds_left = status.remaining_ms / 1000;  // matches the displayed digit, see the constants' comment above
+    if (seconds_left > kRingShowWindowSec) {
+        gui_manager_.SetRingOpacity(0);
+        return;
+    }
+    if (seconds_left > kRingBreathWindowSec) {
+        gui_manager_.SetRingOpacity(255);
+        return;
+    }
+    // Last kRingBreathWindowSec seconds: breathe in sync with remaining_ms's own
+    // position within the current second, same "derive from the value
+    // already on screen, no separate timer" reasoning as the old blink
+    // (design note 7) — a cosine wave that troughs at kRingBreathFloorOpa
+    // right on each second boundary (matching the moment the displayed
+    // digit ticks over) and peaks at full opacity mid-second.
+    constexpr float kTwoPi = 6.28318530718f;
+    const uint32_t phase_ms = status.remaining_ms % kRingBreathPeriodMs;
+    const float phase = static_cast<float>(phase_ms) / static_cast<float>(kRingBreathPeriodMs);
+    const float wave = 0.5f - 0.5f * std::cos(kTwoPi * phase);  // 0 at phase 0, 1 at phase 0.5
+    const uint8_t opa = kRingBreathFloorOpa +
+                         static_cast<uint8_t>(wave * static_cast<float>(255 - kRingBreathFloorOpa));
+    gui_manager_.SetRingOpacity(opa);
 }
 
 void AppController::OnTap()

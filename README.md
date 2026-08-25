@@ -52,3 +52,7 @@ carry a lot of the "why", not just the "what").
 
 [PolyForm Noncommercial 1.0.0](LICENSE) — free to use and modify for any
 noncommercial purpose; commercial use is not permitted.
+
+The primary display font is [Space Grotesk](https://github.com/floriankarsten/space-grotesk),
+Copyright 2020 The Space Grotesk Project Authors, licensed under the
+[SIL Open Font License 1.1](firmware/main/SpaceGrotesk-OFL.txt).

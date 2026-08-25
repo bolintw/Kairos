@@ -159,6 +159,21 @@
 //    call) — those shape what counts as a tap at all, this just ignores
 //    genuine taps for a moment after a flip.
 //
+// 7. Outer ring (2026-08-25, "UI 調整" pass): a second notification
+//    channel alongside brightness — GuiManager's ring_ (see its header),
+//    shown while paused, hidden while running, and shown again in the
+//    closing seconds of a phase with a target duration. Purely a function
+//    of the current TimerFace::Status snapshot each tick — no
+//    elapsed-time state of its own, unlike UpdateBrightness's fade/idle
+//    timers, because there's nothing here that needs to persist across
+//    ticks: "paused" and "remaining_ms" are already facts available every
+//    tick. The last 5s originally hard-blinked on/off derived from
+//    (remaining_ms/1000) % 2; the user found that too harsh on real
+//    hardware, so it's now a smooth breathing fade (SetRingOpacity, a
+//    cosine wave over remaining_ms % 1000) — same underlying idea, still
+//    derived straight from remaining_ms rather than a separate
+//    accumulating timer, so it can't drift out of phase with the digits.
+//
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
 // double-integrating the gyro angle) and passes the resulting Output in.
@@ -180,6 +195,7 @@ private:
     Face QuantizeFace(float screen_angle_deg) const;  // stateful — reads current_face_, see design note 1 above
     std::unique_ptr<TimerFace> CreateFace(Face face);  // the "Factory"
     void UpdateBrightness(uint32_t dt_ms, bool is_moving);  // see design note 5 above
+    void UpdateRing();  // see design note 7 above
 
     GuiManager& gui_manager_;
     std::unique_ptr<TimerFace> current_;  // nullptr while on face D
