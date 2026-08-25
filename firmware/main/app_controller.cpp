@@ -12,6 +12,14 @@ constexpr uint32_t kBreakMsA = 5 * 60 * 1000;
 constexpr uint32_t kFocusMsB = 50 * 60 * 1000;
 constexpr uint32_t kBreakMsB = 10 * 60 * 1000;
 
+// Temporary (2026-08-25): D borrowed for a short Pomodoro so the
+// brightness/notification changes (fade, end-of-focus ramp, always-bright
+// break) can be tested in ~2 minutes instead of waiting out a real 25+
+// minute phase. D's real behavior is still undecided (see CreateFace) —
+// swap back to ReservedFace once done testing.
+constexpr uint32_t kFocusMsD = 60 * 1000;  // 1:00
+constexpr uint32_t kBreakMsD = 30 * 1000;  // 0:30
+
 // See app_controller.hpp's design note 1 for why 80 degrees produces the
 // intended asymmetric enter/leave band by itself.
 constexpr float kFaceHysteresisLeaveDeg = 80.0f;
@@ -21,9 +29,13 @@ constexpr float kFaceHysteresisLeaveDeg = 80.0f;
 // here. See app_controller.hpp design note 5.
 constexpr float kDimmedBrightness = 0.3f;        // immersion-dim floor while running
 constexpr uint32_t kFadeToDimMs = 10 * 1000;      // ~10s fade after becoming bright
-constexpr uint32_t kEndPulseWindowMs = 10 * 1000; // last ~10s of a phase with a target
-constexpr uint32_t kPulsePeriodMs = 1500;         // one breathing dark-bright-dark cycle
-constexpr float kPulseLowBrightness = 0.3f;
+// Last ~30s of a focus-like (non-break) phase: ramp UP to full bright,
+// reaching it within ~3s (faster than the dim-fade, so it reads clearly
+// as a distinct event) and holding there until the phase actually
+// changes — replaces an earlier breathing-pulse design (2026-08-25,
+// user's redesign) that never shipped past a first draft.
+constexpr uint32_t kFocusEndRampWindowMs = 30 * 1000;
+constexpr uint32_t kFocusEndRampMs = 3 * 1000;
 constexpr uint32_t kLongIdleTimeoutMs = 5 * 60 * 1000;  // minutes-scale, paused-only, backlight off
 
 float FaceCenterDeg(AppController::Face face)
@@ -80,7 +92,7 @@ std::unique_ptr<TimerFace> AppController::CreateFace(Face face)
         case Face::kA: return std::make_unique<PomodoroFace>(kFocusMsA, kBreakMsA);
         case Face::kB: return std::make_unique<PomodoroFace>(kFocusMsB, kBreakMsB);
         case Face::kC: return std::make_unique<StopwatchFace>();
-        case Face::kD: return std::make_unique<ReservedFace>();  // debug placeholder, see design note 4
+        case Face::kD: return std::make_unique<PomodoroFace>(kFocusMsD, kBreakMsD);  // temporary test face, see kFocusMsD above
     }
     return nullptr;
 }
@@ -134,13 +146,13 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
     if (current_) {
         current_->onTick(dt_ms);
     }
-    UpdateBrightness(dt_ms);
+    UpdateBrightness(dt_ms, attitude.is_moving);
     if (current_) {
         current_->render(gui_manager_);
     }
 }
 
-void AppController::UpdateBrightness(uint32_t dt_ms)
+void AppController::UpdateBrightness(uint32_t dt_ms, bool is_moving)
 {
     if (!current_) {
         gui_manager_.SetBrightness(0.0f);
@@ -157,34 +169,42 @@ void AppController::UpdateBrightness(uint32_t dt_ms)
     const bool phase_changed = status.has_target && prev_has_target_ &&
                                 status.remaining_ms > prev_remaining_ms_ + dt_ms;
 
-    if (just_started || phase_changed) {
+    // Tapping, flipping (via just_started/just_paused/phase_changed) and
+    // plain movement all count as "the user is engaging with the device
+    // right now" — see design note 5. Folding them into one flag means
+    // spinning the device without crossing a face boundary resets the
+    // same fade/idle clocks a tap or a real flip would.
+    const bool interacting = just_started || just_paused || phase_changed || is_moving;
+    if (interacting) {
         brightness_ = 1.0f;
         bright_phase_elapsed_ms_ = 0;
+        paused_elapsed_ms_ = 0;
     }
-    if (just_paused) {
-        brightness_ = 1.0f;  // 暫停時立即轉亮
-    }
-
-    float warmth = 0.0f;
 
     if (status.is_running) {
         paused_elapsed_ms_ = 0;
         bright_phase_elapsed_ms_ += dt_ms;
 
-        const bool in_end_pulse = status.has_target && status.remaining_ms <= kEndPulseWindowMs;
-        if (in_end_pulse) {
-            const uint32_t t = bright_phase_elapsed_ms_ % kPulsePeriodMs;
-            const float phase = static_cast<float>(t) / static_cast<float>(kPulsePeriodMs);
-            const float triangle = phase < 0.5f ? (phase * 2.0f) : (2.0f - phase * 2.0f);
-            brightness_ = kPulseLowBrightness + triangle * (1.0f - kPulseLowBrightness);
-            warmth = 1.0f;
-        } else if (!just_started && !phase_changed) {
+        const bool in_focus_end_ramp = status.has_target && !status.is_break_phase &&
+                                        status.remaining_ms <= kFocusEndRampWindowMs;
+        if (status.is_break_phase) {
+            // Stays fully bright for the whole break — no fade, nothing
+            // to ramp toward, it's already there.
+            brightness_ = 1.0f;
+        } else if (in_focus_end_ramp) {
+            const uint32_t time_in_window = kFocusEndRampWindowMs - status.remaining_ms;
+            const float ramp_t_raw = static_cast<float>(time_in_window) / static_cast<float>(kFocusEndRampMs);
+            const float ramp_t = ramp_t_raw < 1.0f ? ramp_t_raw : 1.0f;
+            brightness_ = kDimmedBrightness + ramp_t * (1.0f - kDimmedBrightness);
+        } else if (!interacting) {
+            // Linear fade: t is elapsed/kFadeToDimMs (0 -> 1), brightness_
+            // is a straight interpolation between 1.0 and kDimmedBrightness.
             const float t = static_cast<float>(bright_phase_elapsed_ms_) / static_cast<float>(kFadeToDimMs);
             const float clamped_t = t < 1.0f ? t : 1.0f;
             brightness_ = 1.0f + clamped_t * (kDimmedBrightness - 1.0f);
         }
-        // else: just_started/phase_changed already set brightness_=1.0
-        // above; the fade begins next tick, not this one.
+        // else: interacting already set brightness_=1.0 above; the fade
+        // begins next tick, not this one.
     } else {
         paused_elapsed_ms_ += dt_ms;
         if (paused_elapsed_ms_ >= kLongIdleTimeoutMs) {
@@ -193,7 +213,6 @@ void AppController::UpdateBrightness(uint32_t dt_ms)
     }
 
     gui_manager_.SetBrightness(brightness_);
-    gui_manager_.SetWarmth(warmth);
 
     prev_is_running_ = status.is_running;
     prev_has_target_ = status.has_target;

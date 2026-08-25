@@ -16,14 +16,20 @@ public:
     // is running (漸暗 starts on run, 暫停轉亮 on pause — detected by
     // AppController watching is_running edges tick to tick, not a
     // dedicated "just started" flag here) and, if it has a target
-    // duration, how much is left (尾聲脈動). StopwatchFace has no
+    // duration, how much is left (尾聲提示). StopwatchFace has no
     // target, so has_target=false and remaining_ms is meaningless.
-    // Deliberately just facts, no brightness/phase-transition semantics
-    // here — that interpretation stays in AppController.
+    // is_break_phase (added 2026-08-25) lets AppController tell a
+    // "focus-like" phase (fades while running, ramps to full bright near
+    // the end) from a "break-like" one (stays fully bright throughout) —
+    // still just a fact about which phase this is, not a brightness
+    // policy; StopwatchFace has no phases, so always false. Deliberately
+    // just facts, no brightness/phase-transition semantics here — that
+    // interpretation stays in AppController.
     struct Status {
         bool is_running;
         bool has_target;
         uint32_t remaining_ms;
+        bool is_break_phase;
     };
 
     virtual void onEnter() = 0;               // flip into this face: reset and start paused

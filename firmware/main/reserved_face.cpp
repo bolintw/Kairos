@@ -25,5 +25,5 @@ void ReservedFace::render(GuiManager& gui)
 
 TimerFace::Status ReservedFace::GetStatus() const
 {
-    return Status{/*is_running=*/false, /*has_target=*/false, /*remaining_ms=*/0};
+    return Status{/*is_running=*/false, /*has_target=*/false, /*remaining_ms=*/0, /*is_break_phase=*/false};
 }

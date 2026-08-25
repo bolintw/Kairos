@@ -42,5 +42,5 @@ void StopwatchFace::render(GuiManager& gui)
 
 TimerFace::Status StopwatchFace::GetStatus() const
 {
-    return Status{running_, /*has_target=*/false, /*remaining_ms=*/0};
+    return Status{running_, /*has_target=*/false, /*remaining_ms=*/0, /*is_break_phase=*/false};
 }

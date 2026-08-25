@@ -68,5 +68,5 @@ void PomodoroFace::render(GuiManager& gui)
 
 TimerFace::Status PomodoroFace::GetStatus() const
 {
-    return Status{running_, /*has_target=*/true, remaining_ms_};
+    return Status{running_, /*has_target=*/true, remaining_ms_, phase_ == Phase::kBreak};
 }

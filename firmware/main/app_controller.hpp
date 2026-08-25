@@ -83,20 +83,43 @@
 //    longer expected to be null in normal operation.
 //
 // 5. Brightness/notification state machine (M7, plan's "亮度作為通知系
-//    統"), driven off TimerFace::Status polled each tick, edge-detected
-//    here (is_running true->false/false->true, remaining_ms jumping up
-//    = a new phase started):
+//    統"), driven off TimerFace::Status polled each tick (is_running
+//    true->false/false->true, remaining_ms jumping up = a new phase
+//    started) PLUS attitude.is_moving (added 2026-08-25) — a single
+//    `interacting` flag folds all of these together: "the user is
+//    engaging with the device right now", whether that's tapping,
+//    flipping faces, or just spinning it in their hand without crossing
+//    a face boundary:
 //      - face entry (onEnter() just called): snap to full bright,
 //        regardless of the new face's initial is_running (always paused
-//        on entry, but a flip should read as an obvious bright event)
-//      - just started running, or a phase just changed: snap to full
-//        bright, then fade toward a dimmed level over ~10s while running
-//      - within the last ~10s of a phase with a target duration: breathing
-//        brightness pulse + warm/red tint, overriding the fade
-//      - just paused: snap to full bright immediately
-//      - paused continuously past a much longer (minutes-scale) idle
-//        timeout: dim to fully off, independent of the ~10s timeout above
-//    TimerFace never sees any of this — GetStatus() is facts only.
+//        on entry, but a flip should read as an obvious bright event) —
+//        handled directly in Update(), not part of `interacting` below
+//      - interacting while running: snap to full bright and restart the
+//        ~10s linear fade toward a dimmed level — so idly spinning the
+//        device to watch the rotation animation, with no face change,
+//        doesn't let the screen dim out from under you
+//      - break phase (Status::is_break_phase): stays fully bright for the
+//        entire phase, no fade — accepted battery cost for now, revisit
+//        once real battery life is measured (M9)
+//      - last ~30s of a focus-like (non-break) phase with a target
+//        duration: ramps UP to full bright, reaching it within ~3s
+//        (faster than the ~10s dim-fade, so it reads as a distinct
+//        event) and holding there until the phase actually changes —
+//        deliberately NOT interrupted by mere movement, since drawing
+//        attention is the whole point of this window. Replaces an
+//        earlier breathing dark-bright-dark pulse design (2026-08-25,
+//        user's redesign after using it) — ramping toward brighter reads
+//        more clearly and is easier on the eyes than oscillating. The
+//        warm/red color tint that used to accompany this was dropped the
+//        same day to keep the notification channel to brightness alone
+//        for now — GuiManager::SetWarmth() still exists if it comes back
+//      - interacting while paused: snap to full bright and restart the
+//        long idle timeout below
+//      - paused with no interaction for a much longer (minutes-scale)
+//        idle timeout: dim to fully off, independent of the ~10s timeout
+//        above
+//    TimerFace never sees any of this — GetStatus() is facts only;
+//    AttitudeEstimator likewise has no notion of brightness.
 //
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
@@ -117,7 +140,7 @@ public:
 private:
     Face QuantizeFace(float screen_angle_deg) const;  // stateful — reads current_face_, see design note 1 above
     std::unique_ptr<TimerFace> CreateFace(Face face);  // the "Factory"
-    void UpdateBrightness(uint32_t dt_ms);             // see design note 5 above
+    void UpdateBrightness(uint32_t dt_ms, bool is_moving);  // see design note 5 above
 
     GuiManager& gui_manager_;
     std::unique_ptr<TimerFace> current_;  // nullptr while on face D

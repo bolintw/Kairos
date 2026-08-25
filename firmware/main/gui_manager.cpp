@@ -30,6 +30,14 @@ GuiManager::GuiManager(LGFX& lcd)
     lv_obj_set_style_text_font(label_, kPrimaryFont, 0);
     lv_obj_set_style_text_align(label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(label_, LV_ALIGN_CENTER, 0, 0);
+    // Set directly here, not left to SetWarmth(0.0f)'s side effect —
+    // AppController stopped calling SetWarmth (2026-08-25, brightness-only
+    // notifications), which silently left label_ on LVGL's default text
+    // color (near-invisible on the black background) since nothing else
+    // ever set it. SetWarmth() still exists and still works if the color
+    // channel comes back, but this baseline can't depend on it being
+    // called at all.
+    lv_obj_set_style_text_color(label_, lv_color_white(), 0);
 }
 
 void GuiManager::SetPrimaryText(const char* text)
