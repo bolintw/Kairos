@@ -20,9 +20,18 @@ constexpr uint32_t kBreakMsB = 10 * 60 * 1000;
 constexpr uint32_t kFocusMsD = 60 * 1000;  // 1:00
 constexpr uint32_t kBreakMsD = 30 * 1000;  // 0:30
 
-// See app_controller.hpp's design note 1 for why 80 degrees produces the
-// intended asymmetric enter/leave band by itself.
-constexpr float kFaceHysteresisLeaveDeg = 80.0f;
+// See app_controller.hpp's design note 1 for why this single value
+// produces both the leave and return bands by itself (leave at this
+// distance from the current face's own center, return within
+// 90-this-value of the new face's center, since centers are 90 deg
+// apart). 80 -> 70 -> 65 (2026-08-25): with the new low-pass filter's
+// convergence lag (attitude_estimator.cpp, kLowPassAlpha), the settled
+// angle after a flip was landing close enough to the leave/return
+// boundary that returning felt sluggish. 70 (return band +-20) still
+// felt a bit slow; 65 widens it to +-25. Leaving a face gets marginally
+// easier too (65 deg swing instead of 80) as a side effect of the same
+// single parameter.
+constexpr float kFaceHysteresisLeaveDeg = 65.0f;
 
 // Brightness/notification tuning — starting points per the plan's own
 // note that these need real usage to validate, not to be locked down
@@ -41,7 +50,13 @@ constexpr uint32_t kLongIdleTimeoutMs = 5 * 60 * 1000;  // minutes-scale, paused
 // See app_controller.hpp design note 6 — window after a face switch
 // during which a tap is ignored, absorbing flip-induced tap-engine
 // false triggers instead of letting them immediately start the timer.
-constexpr uint32_t kTapMuteAfterSwitchMs = 1000;
+// 400 -> 1000 -> 500 (2026-08-25): the 1000ms version was tuned before
+// realizing the countdown started at commit (often mid-swing, still
+// moving), wasting most of the window before settling. Now that it only
+// counts down once !attitude.is_moving (Update()), the full window
+// consistently applies from the moment it's needed, so 500 is back to a
+// shorter, less sluggish-feeling value.
+constexpr uint32_t kTapMuteAfterSwitchMs = 500;
 
 float FaceCenterDeg(AppController::Face face)
 {
@@ -150,7 +165,13 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
         // See design note 6: absorb flip-induced tap-engine false
         // triggers instead of letting them start the timer immediately.
         tap_mute_remaining_ms_ = kTapMuteAfterSwitchMs;
-    } else if (tap_mute_remaining_ms_ > 0) {
+    } else if (tap_mute_remaining_ms_ > 0 && !attitude.is_moving) {
+        // Only count down once actually settled — commits fire the
+        // instant quantized changes (see above), which can be mid-swing,
+        // still moving. Counting down through that motion wasted most of
+        // the window before the residual-vibration risk this exists for
+        // even starts; holding it at full while is_moving stays true
+        // means the full window applies from the moment it's needed.
         tap_mute_remaining_ms_ = dt_ms < tap_mute_remaining_ms_ ? tap_mute_remaining_ms_ - dt_ms : 0;
     }
 

@@ -20,15 +20,17 @@
 //    Angle hysteresis (added 2026-08-23, user's drone flight-controller
 //    background): quantization alone would flip-flop if the settled
 //    angle sits near a 45-degree boundary (small accel noise while
-//    resting is enough — alpha=0.8 still applies 20% accel weight every
-//    tick). QuantizeFace() is stateful: it only moves off current_face_
-//    once the angle is more than kFaceHysteresisLeaveDeg (80) away from
-//    current_face_'s own center; otherwise it stays put. That single rule
-//    produces both halves of the intended band by construction — e.g.
-//    currently on B (center 0): stays B until angle passes -80/+80
-//    (matches "leave at ±80"), and once on A or C, doesn't come back to B
-//    until within 10 of B's center (80 away from A/C's own center —
-//    same rule, just measured from the other side).
+//    resting is enough). QuantizeFace() is stateful: it only moves off
+//    current_face_ once the angle is more than kFaceHysteresisLeaveDeg
+//    away from current_face_'s own center; otherwise it stays put. That
+//    single rule produces both halves of the intended band by
+//    construction — e.g. currently on B (center 0): stays B until angle
+//    passes -kFaceHysteresisLeaveDeg/+kFaceHysteresisLeaveDeg ("leave"),
+//    and once on A or C, doesn't come back to B until within
+//    (90-kFaceHysteresisLeaveDeg) of B's center ("return" —
+//    kFaceHysteresisLeaveDeg away from A/C's own center, same rule, just
+//    measured from the other side). Currently 65 (see app_controller.cpp
+//    for the 80->70->65 history), so leave at +-65, return within +-25.
 //
 // 2. Reset (onExit/onEnter) fires only when, at rest, the quantized face
 //    disagrees with current_face_ (the confirmed face) — not on every
@@ -122,17 +124,40 @@
 //    AttitudeEstimator likewise has no notion of brightness.
 //
 // 6. Tap mute window (2026-08-25): OnTap() is ignored for
-//    kTapMuteAfterSwitchMs after a face switch commits — the user found
+//    kTapMuteAfterSwitchMs after a face switch settles — the user found
 //    a flip often lands with enough residual wobble/vibration to trip
 //    the tap engine an instant later, immediately starting the timer on
 //    a face they just arrived at (expected to get worse once the device
 //    is inside an enclosure, more surface area to knock). tap_mute_
-//    remaining_ms_ is armed to the window length on every face commit
-//    and counted down every tick; OnTap() no-ops while it's nonzero.
+//    remaining_ms_ is armed to the window length on every face commit,
+//    but only counts down while !attitude.is_moving — commits fire the
+//    instant quantized changes (design note 2), often still mid-swing,
+//    so counting down unconditionally from the commit moment could burn
+//    through most of the window before the device actually stops moving,
+//    which is when the residual-vibration risk this exists for actually
+//    starts. Holding the countdown at full while still moving means the
+//    whole window applies from the moment it's needed. OnTap() no-ops
+//    while it's nonzero.
+//
+//    Briefly generalized (same day) to arm/hold on *any*
+//    attitude.is_moving, not just a face-switch commit, on the theory
+//    that any handling deserves the same grace period. Reverted after
+//    hardware testing: a light finger tap on the screen alone was enough
+//    to flip is_moving 0->1->0 (matches design note 2's history — a
+//    tap's vibration crossing is_moving isn't hypothetical on this
+//    hardware, it's already caused one bug before). Under the
+//    any-movement version that re-arms the mute window from the tap's
+//    own vibration, making the timer noticeably harder to trigger by
+//    tapping at all, not just a rare rapid-retap edge case. Scoping the
+//    arm back to face-switch commits avoids this: it doesn't re-arm from
+//    an ordinary tap's own is_moving blip once the window has already
+//    reached 0, since nothing there triggers on is_moving alone.
+//
 //    Deliberately app-level and orthogonal to the tap engine's own
-//    internal detection windows (peak_window/tap_window/d_tap_window in
-//    main.cpp's ConfigureTap call) — those shape what counts as a tap at
-//    all, this just ignores genuine taps for a moment after a flip.
+//    internal detection windows
+//    (peak_window/tap_window/d_tap_window in main.cpp's ConfigureTap
+//    call) — those shape what counts as a tap at all, this just ignores
+//    genuine taps for a moment after a flip.
 //
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids

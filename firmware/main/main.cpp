@@ -282,8 +282,18 @@ extern "C" void app_main(void)
             // integration in AttitudeEstimator and AppController's
             // onTick() need the real value or they drift, same class of
             // bug as the earlier stopwatch timing fix.
+            //
+            // Round to the nearest ms (+500 before truncating), not
+            // truncate — plain integer division here systematically
+            // discards the sub-millisecond remainder every tick (up to
+            // 999us, ~500us on average), which is a real, measured drift
+            // source: TimerFace::onTick(dt_ms) accumulates this same
+            // dt_ms directly, so the loss compounds with tick rate — a
+            // stopwatch measured ~2% slow at the old 150ms/~6.7Hz sensor
+            // rate would lose roughly 6% at the current 120Hz if left
+            // truncating (2026-08-25).
             const uint32_t sensor_dt_ms =
-                static_cast<uint32_t>((now_us - last_sensor_update_us) / 1000);
+                static_cast<uint32_t>((now_us - last_sensor_update_us + 500) / 1000);
             last_sensor_update_us = now_us;
 
             Qmi8658::Sample sample;
