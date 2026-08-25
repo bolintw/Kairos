@@ -48,10 +48,24 @@
 //    is_moving gyro-rate threshold: the commit was gated behind a latch
 //    that only a fast-enough motion could set, so a gentle return to a
 //    face stayed stuck until some later unrelated fast flip happened to
-//    re-arm it. Now the commit condition just directly compares quantized
-//    to current_face_ every tick while at rest; no latch needed. Boot is
-//    bootstrapped via `!current_` (no face exists yet) rather than a
-//    separate "always commit once" flag.
+//    re-arm it. Fixed by comparing quantized to current_face_ directly,
+//    still gated on `!attitude.is_moving` (only commit once settled).
+//
+//    Third version (2026-08-25): dropped the `!attitude.is_moving` gate
+//    entirely — commits the instant quantized disagrees with
+//    current_face_, moving or not. That gate was originally kept as a
+//    hedge against gyro angle overshoot during a flip (pre gyro-scale-fix
+//    /alpha-tuning, a fast rotation could transiently read 30-40 degrees
+//    past true, so switching mid-motion risked triggering on a bogus
+//    reading); once that overshoot was fixed, the user tried removing it
+//    on hardware and preferred the immediate feel. QuantizeFace's own
+//    80-degree hysteresis still rejects resting noise on its own — the
+//    is_moving gate was redundant on top of it, same shape of fix as the
+//    latch removal above. Trade-off accepted: a fast swipe that passes
+//    *through* a face's zone on the way to another one now commits (and
+//    resets) that passed-through face too, not just the final settled
+//    one. Boot is bootstrapped via `!current_` (no face exists yet)
+//    rather than a separate "always commit once" flag.
 //
 // 3. Taps are forwarded unconditionally — NOT gated on is_moving (that
 //    was the first version's attempted fix for accidental tap-engine

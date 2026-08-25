@@ -89,16 +89,26 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
 {
     const Face quantized = QuantizeFace(attitude.screen_angle_deg);
 
-    // Commit as soon as we're at rest and quantized disagrees with the
-    // confirmed face (or there's no face yet, at boot) — see design note 2
-    // for why this doesn't need to also confirm is_moving was observed
-    // true at some point: QuantizeFace's 80-degree hysteresis already
-    // proves real movement happened, so gating on the instantaneous gyro
-    // threshold too was redundant, and broke on a slow final correction
-    // that crossed the boundary without ever exceeding that threshold —
-    // was_disturbed_ never latched, so the commit below never ran, even
-    // though quantized was already correct.
-    if (!attitude.is_moving && (!current_ || quantized != current_face_)) {
+    // Commit the instant quantized disagrees with the confirmed face (or
+    // there's no face yet, at boot) — no settle wait. Went through two
+    // earlier stages: originally gated on `!attitude.is_moving` (only
+    // commit once motion stopped), which itself needed a `was_disturbed_`
+    // latch removed on 2026-08-24 (see git history) because it broke on
+    // slow final corrections. The `is_moving` gate itself was kept a bit
+    // longer as a hedge against angle overshoot during a flip — before
+    // the gyro scale fix + alpha tuning, a fast rotation could transiently
+    // read 30-40 degrees past its true angle, so switching immediately
+    // risked triggering on a bogus mid-flip reading. With that fixed
+    // (see qmi8658.hpp, kComplementaryAlpha), the overshoot that
+    // motivated waiting is gone, and the user found immediate switching
+    // feels better on hardware (2026-08-25) — QuantizeFace's own 80-degree
+    // hysteresis is enough to reject resting noise on its own, gating on
+    // is_moving too was redundant, same shape of issue as the latch fix.
+    // Residual trade-off: a fast swipe that passes *through* a face's
+    // zone on the way to another one now commits (and resets) that
+    // passed-through face too, instead of only the final settled one —
+    // accepted as fine for how the device is actually being flipped.
+    if (!current_ || quantized != current_face_) {
         if (current_) {
             current_->onExit();
         }
