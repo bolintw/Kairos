@@ -58,16 +58,21 @@ constexpr uint32_t kLongIdleTimeoutMs = 5 * 60 * 1000;  // minutes-scale, paused
 // shorter, less sluggish-feeling value.
 constexpr uint32_t kTapMuteAfterSwitchMs = 500;
 
-// See app_controller.hpp design note 7 — outer ring show/breathe windows.
-// In whole seconds, not ms: the primary label displays
-// remaining_ms/1000 (truncated), so a "30" displayed second actually
-// spans remaining_ms in [30000, 30999] — comparing against a flat 30000ms
-// threshold turned the ring on only for the last 1ms of that second,
-// which read as the ring lagging a full second behind the digits (caught
-// on hardware, 2026-08-25: "上一版準時亮起，這次變成29秒才亮"). Comparing
-// truncated seconds directly instead keeps the ring in sync with
-// whichever second is actually on screen.
-constexpr uint32_t kRingShowWindowSec = 30;
+// See app_controller.hpp design note 7 — outer ring breathe window, in
+// whole seconds not ms: the primary label displays remaining_ms/1000
+// (truncated), so comparing truncated seconds directly (rather than a
+// flat *000ms threshold, which caused a real one-second sync lag caught
+// on hardware 2026-08-25) keeps the ring in sync with whichever second is
+// actually on screen. There used to be a second, wider "solid ring" window
+// (kRingShowWindowSec, last ~30s) doubling up with brightness's own
+// end-of-phase ramp as a second "approaching the end" cue — dropped
+// 2026-08-26: the ring was already always solid-255 while paused, so
+// during that 30s window a paused ring and a merely-running-near-the-end
+// ring looked identical, and pausing inside it was invisible ("看不出來有
+// 沒有觸發"). The ring now means exactly one thing at any of these
+// thresholds — paused — plus this one breathing window as a distinct
+// "about to end" cue while still running; the wider approach-cue lives
+// only in brightness now (kFocusEndRampWindowMs above).
 constexpr uint32_t kRingBreathWindowSec = 5;
 // A hard on/off blink (2026-08-25 first version) read as too harsh on
 // hardware — replaced same day with a smooth breathing fade between this
@@ -289,15 +294,16 @@ void AppController::UpdateRing()
         return;
     }
     const uint32_t seconds_left = status.remaining_ms / 1000;  // matches the displayed digit, see the constants' comment above
-    if (seconds_left > kRingShowWindowSec) {
-        gui_manager_.SetRingOpacity(0);
-        return;
-    }
     if (seconds_left > kRingBreathWindowSec) {
-        gui_manager_.SetRingOpacity(255);
+        gui_manager_.SetRingOpacity(0);  // running, not yet near the end — the brightness ramp carries that cue now
         return;
     }
-    // Last kRingBreathWindowSec seconds: breathe in sync with remaining_ms's own
+    // Last kRingBreathWindowSec seconds, still running (the !is_running
+    // check above already caught paused, including paused mid-breath —
+    // pausing here always reads as a full, unambiguous 255, never a
+    // half-breath, and resuming falls back into this branch and picks the
+    // wave up from wherever remaining_ms already was, since it never
+    // moved while paused): breathe in sync with remaining_ms's own
     // position within the current second, same "derive from the value
     // already on screen, no separate timer" reasoning as the old blink
     // (design note 7) — a cosine wave that troughs at kRingBreathFloorOpa

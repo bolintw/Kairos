@@ -12,17 +12,21 @@
 // in-tree, unlike reference/vendor/ which is gitignored, since the OFL
 // requires the license to travel with any distributed copy of the font,
 // including this subsetted embedded form). Glyph range restricted to
-// "0123456789:" since that's all the primary label ever shows — keeps
-// the generated font_space_grotesk_bold_40.c small instead of embedding
-// a full Latin charset. --no-compress is required: lv_font_conv's default
-// RLE-compressed glyph format needs CONFIG_LV_USE_FONT_COMPRESSED, which
-// this build doesn't enable — compressed glyphs silently rendered as
-// nothing (2026-08-25, caught on real hardware: ring/debug overlay both
-// fine, primary digits just invisible). Regenerate (all one command,
-// wrapped here only for line length) with: npx lv_font_conv --font
+// "0123456789:FocusRelax" — digits+colon for the countdown, plus exactly
+// the letters PomodoroFace's phase-transition caption needs ("Focus"/
+// "Relax", 2026-08-26) — keeps the generated
+// font_space_grotesk_bold_40.c small instead of embedding a full Latin
+// charset; any new caption word needs its new letters added here too.
+// --no-compress is required: lv_font_conv's default RLE-compressed glyph
+// format needs CONFIG_LV_USE_FONT_COMPRESSED, which this build doesn't
+// enable — compressed glyphs silently rendered as nothing (2026-08-25,
+// caught on real hardware: ring/debug overlay both fine, primary digits
+// just invisible). Regenerate (all one command, wrapped here only for
+// line length) with: npx lv_font_conv --font
 // reference/vendor/fonts/SpaceGrotesk-Bold.ttf --size 40 --bpp 4
-// --format lvgl --no-compress --symbols "0123456789:" --lv-font-name
-// font_space_grotesk_bold_40 -o firmware/main/font_space_grotesk_bold_40.c
+// --format lvgl --no-compress --symbols "0123456789:FocusRelax"
+// --lv-font-name font_space_grotesk_bold_40
+// -o firmware/main/font_space_grotesk_bold_40.c
 // if the size/weight/character set ever needs to change — then edit the
 // generated file's top #include block to a plain `#include "lvgl.h"`
 // (see the comment left in font_space_grotesk_bold_40.c for why: the
@@ -109,6 +113,16 @@ public:
 
     void SetPrimaryText(const char* text);
 
+    // Primary label's own text opacity, 0-255 — separate from
+    // SetBrightness() (backlight PWM, whole-screen) and SetAccentColor()
+    // (hue). Added 2026-08-26 for PomodoroFace's phase-transition caption
+    // ("Focus"/"Relax"): a plain text swap read as too abrupt next to the
+    // ring's smooth cosine breathing, so the caption fades itself in and
+    // back out the same way — see PomodoroFace::render(). Callers must
+    // reset this to 255 when going back to steady-state content, or it'll
+    // still be sitting at whatever the caption last faded to.
+    void SetPrimaryTextOpacity(uint8_t opa);
+
     // brightness: 0.0 (off) to 1.0 (full). Scaled to the LGFX/LEDC 0-255
     // range internally.
     void SetBrightness(float brightness);
@@ -174,6 +188,8 @@ private:
     bool has_last_rotation_ = false;
     uint8_t last_ring_opa_ = 0;
     bool has_last_ring_opa_ = false;
+    uint8_t last_text_opa_ = 0;
+    bool has_last_text_opa_ = false;
     uint32_t update_count_ = 0;
 
     LGFX& lcd_;

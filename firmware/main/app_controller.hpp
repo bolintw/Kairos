@@ -159,20 +159,48 @@
 //    call) — those shape what counts as a tap at all, this just ignores
 //    genuine taps for a moment after a flip.
 //
-// 7. Outer ring (2026-08-25, "UI 調整" pass): a second notification
-//    channel alongside brightness — GuiManager's ring_ (see its header),
-//    shown while paused, hidden while running, and shown again in the
-//    closing seconds of a phase with a target duration. Purely a function
-//    of the current TimerFace::Status snapshot each tick — no
-//    elapsed-time state of its own, unlike UpdateBrightness's fade/idle
-//    timers, because there's nothing here that needs to persist across
-//    ticks: "paused" and "remaining_ms" are already facts available every
-//    tick. The last 5s originally hard-blinked on/off derived from
-//    (remaining_ms/1000) % 2; the user found that too harsh on real
-//    hardware, so it's now a smooth breathing fade (SetRingOpacity, a
-//    cosine wave over remaining_ms % 1000) — same underlying idea, still
-//    derived straight from remaining_ms rather than a separate
-//    accumulating timer, so it can't drift out of phase with the digits.
+// 7. Outer ring (2026-08-25, "UI 調整" pass, revised 2026-08-26): a
+//    second notification channel alongside brightness — GuiManager's
+//    ring_ (see its header). Purely a function of the current
+//    TimerFace::Status snapshot each tick, no elapsed-time state of its
+//    own, unlike UpdateBrightness's fade/idle timers — "paused" and
+//    "remaining_ms" are already facts available every tick.
+//
+//    Settled meaning (2026-08-26): the ring means exactly one thing,
+//    "paused" (solid), at any point in a phase — checked first in
+//    UpdateRing(), unconditionally, before anything else — PLUS a
+//    distinct breathing cue in the closing kRingBreathWindowSec seconds
+//    while still running. Originally also solid for a much wider ~30s
+//    "approaching the end" window regardless of running/paused — dropped
+//    same day the caption (note 8) shipped, once the user noticed a
+//    paused ring and a merely-near-the-end running ring looked identical
+//    in that window, making it impossible to tell from the ring alone
+//    whether a pause during those 30s had actually registered. The
+//    wider "approaching the end" cue still exists, just moved entirely
+//    to brightness (kFocusEndRampWindowMs) — the ring no longer
+//    double-duties as that signal.
+//
+//    Because the `!is_running` check runs first and unconditionally,
+//    pausing during the breathing window snaps straight to solid 255
+//    with no special-casing needed, and resuming falls back into the
+//    breathing branch and picks the wave up from wherever it already
+//    was — remaining_ms is frozen while paused, so nothing needs to
+//    remember "the brightness before pausing", it's just still there.
+//
+//    The breathing itself was originally a hard on/off blink derived
+//    from (remaining_ms/1000) % 2; the user found that too harsh on real
+//    hardware, replaced same day with a smooth fade (SetRingOpacity, a
+//    cosine wave over remaining_ms % 1000) — still derived straight from
+//    remaining_ms rather than a separate accumulating timer, so it can't
+//    drift out of phase with the digits.
+//
+// 8. Phase-transition caption (2026-08-26): entirely inside PomodoroFace,
+//    not AppController — see pomodoro_face.hpp's transition_remaining_ms_
+//    field comment. Mentioned here only because design note 7 above
+//    references it: the two features share a screen but were built to be
+//    fully orthogonal (the caption doesn't know the ring exists, and vice
+//    versa), which is what let each one get simplified/fixed
+//    independently without touching the other.
 //
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids

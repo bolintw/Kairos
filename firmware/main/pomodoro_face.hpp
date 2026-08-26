@@ -37,4 +37,18 @@ private:
     Phase phase_ = Phase::kFocus;
     uint32_t remaining_ms_ = 0;
     bool running_ = false;
+
+    // Phase-transition caption (2026-08-26, "UI 調整" pass): render()
+    // shows "Focus"/"Relax" instead of the MM:SS countdown for
+    // kTransitionMs after AdvancePhase() fires, then falls back to the
+    // numeric display on its own. Deliberately decremented in onTick()
+    // BEFORE the `if (!running_) return` gate — the caption is an
+    // announcement of an event that already happened, not part of the
+    // countdown itself, so it keeps playing out on wall-clock time even
+    // if the user pauses mid-caption (the pause still shows up
+    // immediately elsewhere, via the outer ring — see AppController's
+    // UpdateRing, which reacts to is_running with no knowledge of this
+    // caption at all). Once it reaches 0, render() reverts to MM:SS,
+    // which by then reflects whatever running_ state actually is.
+    uint32_t transition_remaining_ms_ = 0;
 };

@@ -68,6 +68,17 @@ void GuiManager::SetPrimaryText(const char* text)
     ++update_count_;
 }
 
+void GuiManager::SetPrimaryTextOpacity(uint8_t opa)
+{
+    if (has_last_text_opa_ && opa == last_text_opa_) {
+        return;  // unchanged — same reasoning as SetPrimaryText's dirty-check
+    }
+    last_text_opa_ = opa;
+    has_last_text_opa_ = true;
+    lv_obj_set_style_text_opa(label_, opa, 0);
+    ++update_count_;
+}
+
 void GuiManager::SetBrightness(float brightness)
 {
     lcd_.setBrightness(static_cast<uint8_t>(Clamp01(brightness) * 255.0f + 0.5f));

@@ -48,6 +48,12 @@ void StopwatchFace::render(GuiManager& gui)
         std::snprintf(buf, sizeof(buf), "%02u:%02u",
                        static_cast<unsigned int>(minutes), static_cast<unsigned int>(seconds));
     }
+    // Defensive reset, not just cosmetic default: GuiManager's text-opacity
+    // state persists across face switches, so flipping away from
+    // PomodoroFace mid-caption-fade (see its render()) would otherwise
+    // leave this face's digits stuck at whatever partial opacity the
+    // caption was fading through.
+    gui.SetPrimaryTextOpacity(255);
     gui.SetPrimaryText(buf);
     gui.SetAccentColor(kColorCountUp);
 }
