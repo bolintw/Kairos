@@ -25,13 +25,17 @@ constexpr float kAzInvalidThresholdG = 0.3f;
 constexpr float kComplementaryAlpha = 0.9f;  // weight on gyro-integrated angle
 
 // Single-pole low-pass on the raw samples — see the header's field
-// comment. 0.8 -> 0.2 -> 0.4 (2026-08-25, all same day). 0.8 was
-// backwards from the intended smoothing strength (~5ms tau, barely any
-// effect). 0.2 (~37ms tau) visibly steadied the resting jitter but made
-// active rotation noticeably laggier. 0.4 (~16ms tau) trades back some
-// smoothing for responsiveness — adjust further in either direction on
-// hardware if this balance isn't right.
-constexpr float kLowPassAlpha = 0.4f;
+// comment. 0.8 -> 0.2 -> 0.4 -> 0.6 (0.8/0.2/0.4 on 2026-08-25, 0.6 on
+// 2026-08-26 after enclosure testing). 0.8 was backwards from the
+// intended smoothing strength (~5ms tau, barely any effect). 0.2 (~37ms
+// tau) visibly steadied the resting jitter but made active rotation
+// noticeably laggier. 0.4 (~16ms tau) traded back some smoothing for
+// responsiveness but still read as sluggish once tested mounted in the
+// finished enclosure rather than hand-held. 0.6 (~9ms tau at 120Hz)
+// continues that same direction — if this now reads as jittery/noisy
+// instead of laggy, that's the tradeoff to dial back against; adjust
+// further in either direction on hardware if this balance isn't right.
+constexpr float kLowPassAlpha = 0.6f;
 
 float LowPass(float new_x, float old_x, float alpha)
 {

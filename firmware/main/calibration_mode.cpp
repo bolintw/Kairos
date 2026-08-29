@@ -12,7 +12,7 @@
 #include "nvs_calibration.hpp"
 
 namespace {
-constexpr int kCountdownSeconds = 5;
+constexpr int kCountdownSeconds = 10;
 constexpr int64_t kSamplingDurationUs = 2 * 1000 * 1000;
 constexpr int kSamplingPeriodMs = 10;  // ~100Hz during calibration — plenty for averaging
 constexpr int kUiTickMs = 5;           // matches main.cpp's LVGL tick period

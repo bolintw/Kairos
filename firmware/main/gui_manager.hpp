@@ -3,31 +3,34 @@
 #include "lgfx_config.hpp"
 #include "lvgl.h"
 
-// Space Grotesk Bold, 40px, digits+colon only (2026-08-25 "UI 調整" pass
-// — LVGL's built-in Montserrat has no bold weight and was judged not
+// Space Grotesk Bold, 40px, full printable ASCII (2026-08-25 "UI 調整"
+// pass — LVGL's built-in Montserrat has no bold weight and was judged not
 // elegant enough for the primary display). Generated via lv_font_conv
 // from reference/vendor/fonts/SpaceGrotesk-Bold.ttf — SIL OFL 1.1,
 // Copyright 2020 The Space Grotesk Project Authors; license text tracked
 // alongside the generated font source at SpaceGrotesk-OFL.txt (kept
 // in-tree, unlike reference/vendor/ which is gitignored, since the OFL
 // requires the license to travel with any distributed copy of the font,
-// including this subsetted embedded form). Glyph range restricted to
-// "0123456789:FocusRelax" — digits+colon for the countdown, plus exactly
-// the letters PomodoroFace's phase-transition caption needs ("Focus"/
-// "Relax", 2026-08-26) — keeps the generated
-// font_space_grotesk_bold_40.c small instead of embedding a full Latin
-// charset; any new caption word needs its new letters added here too.
-// --no-compress is required: lv_font_conv's default RLE-compressed glyph
-// format needs CONFIG_LV_USE_FONT_COMPRESSED, which this build doesn't
-// enable — compressed glyphs silently rendered as nothing (2026-08-25,
-// caught on real hardware: ring/debug overlay both fine, primary digits
-// just invisible). Regenerate (all one command, wrapped here only for
-// line length) with: npx lv_font_conv --font
+// including this subsetted embedded form). Originally hand-curated down
+// to just "0123456789:FocusRelax" — the exact characters in use at the
+// time — but that broke the moment a string outside that set showed up:
+// calibration_mode.cpp's "Calib in %d"/"Hold still..."/"Calibrated"
+// rendered as boxes on real hardware (2026-08-26) because none of its
+// letters were in the font. Switched to the full 0x20-0x7E range instead
+// of trying to keep a hand-curated charset in sync with every string in
+// the codebase — ~460KB of free flash made the size difference (about
+// 25KB more) not worth the fragility. --no-compress is required:
+// lv_font_conv's default RLE-compressed glyph format needs
+// CONFIG_LV_USE_FONT_COMPRESSED, which this build doesn't enable —
+// compressed glyphs silently rendered as nothing (2026-08-25, caught on
+// real hardware: ring/debug overlay both fine, primary digits just
+// invisible). Regenerate (all one command, wrapped here only for line
+// length) with: npx lv_font_conv --font
 // reference/vendor/fonts/SpaceGrotesk-Bold.ttf --size 40 --bpp 4
-// --format lvgl --no-compress --symbols "0123456789:FocusRelax"
+// --format lvgl --no-compress --range "0x20-0x7E"
 // --lv-font-name font_space_grotesk_bold_40
 // -o firmware/main/font_space_grotesk_bold_40.c
-// if the size/weight/character set ever needs to change — then edit the
+// if the size/weight ever needs to change — then edit the
 // generated file's top #include block to a plain `#include "lvgl.h"`
 // (see the comment left in font_space_grotesk_bold_40.c for why: the
 // tool's default ifdef only resolves correctly from inside the lvgl
