@@ -56,6 +56,7 @@ void StopwatchFace::render(GuiManager& gui)
     gui.SetPrimaryTextOpacity(255);
     gui.SetPrimaryText(buf);
     gui.SetAccentColor(kColorCountUp);
+    gui.SetSecondaryText("");  // see PomodoroFace::render()'s identical reset — same leftover-state risk from BreathFace
 }
 
 TimerFace::Status StopwatchFace::GetStatus() const

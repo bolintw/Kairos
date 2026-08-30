@@ -79,6 +79,11 @@ void PomodoroFace::AdvancePhase()
 void PomodoroFace::render(GuiManager& gui)
 {
     gui.SetAccentColor(phase_ == Phase::kFocus ? kColorFocus : kColorBreak);
+    // Defensive, not cosmetic: GuiManager's secondary-line text persists
+    // across face switches, so flipping here from BreathFace (which uses
+    // it for its phase name) would otherwise leave a stale "Inhale"/
+    // "Hold"/"Exhale" floating above this face's own countdown.
+    gui.SetSecondaryText("");
 
     if (transition_remaining_ms_ > 0) {
         // Fade the caption itself in and back out over the window instead

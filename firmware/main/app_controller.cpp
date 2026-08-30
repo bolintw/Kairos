@@ -2,8 +2,8 @@
 
 #include <cmath>
 
+#include "breath_face.hpp"
 #include "pomodoro_face.hpp"
-#include "reserved_face.hpp"
 #include "stopwatch_face.hpp"
 
 namespace {
@@ -11,14 +11,6 @@ constexpr uint32_t kFocusMsA = 25 * 60 * 1000;
 constexpr uint32_t kBreakMsA = 5 * 60 * 1000;
 constexpr uint32_t kFocusMsB = 50 * 60 * 1000;
 constexpr uint32_t kBreakMsB = 10 * 60 * 1000;
-
-// Temporary (2026-08-25): D borrowed for a short Pomodoro so the
-// brightness/notification changes (fade, end-of-focus ramp, always-bright
-// break) can be tested in ~2 minutes instead of waiting out a real 25+
-// minute phase. D's real behavior is still undecided (see CreateFace) —
-// swap back to ReservedFace once done testing.
-constexpr uint32_t kFocusMsD = 60 * 1000;  // 1:00
-constexpr uint32_t kBreakMsD = 40 * 1000;  // 0:40
 
 // See app_controller.hpp's design note 1 for why this single value
 // produces both the leave and return bands by itself (leave at this
@@ -136,7 +128,7 @@ std::unique_ptr<TimerFace> AppController::CreateFace(Face face)
         case Face::kA: return std::make_unique<PomodoroFace>(kFocusMsA, kBreakMsA);
         case Face::kB: return std::make_unique<PomodoroFace>(kFocusMsB, kBreakMsB);
         case Face::kC: return std::make_unique<StopwatchFace>();
-        case Face::kD: return std::make_unique<PomodoroFace>(kFocusMsD, kBreakMsD);  // temporary test face, see kFocusMsD above
+        case Face::kD: return std::make_unique<BreathFace>();
     }
     return nullptr;
 }

@@ -28,10 +28,15 @@ GuiManager::GuiManager(LGFX& lcd)
     lv_obj_set_style_transform_pivot_x(root_, kRootWidthPx / 2, 0);
     lv_obj_set_style_transform_pivot_y(root_, kRootHeightPx / 2, 0);
 
+    // Bottom-aligned rather than centered (2026-08-30, was LV_ALIGN_CENTER)
+    // to make room for secondary_label_ above it — line_height 44 (this
+    // font) + 16 (secondary_label_'s) == kRootHeightPx (60) exactly, so
+    // the two stack flush with no gap or overlap and no need to grow
+    // root_.
     label_ = lv_label_create(root_);
     lv_obj_set_style_text_font(label_, kPrimaryFont, 0);
     lv_obj_set_style_text_align(label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(label_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(label_, LV_ALIGN_BOTTOM_MID, 0, 0);
     // Set directly here, not left to SetWarmth(0.0f)'s side effect —
     // AppController stopped calling SetWarmth (2026-08-25, brightness-only
     // notifications), which silently left label_ on LVGL's default text
@@ -40,6 +45,26 @@ GuiManager::GuiManager(LGFX& lcd)
     // channel comes back, but this baseline can't depend on it being
     // called at all.
     lv_obj_set_style_text_color(label_, lv_color_white(), 0);
+
+    // See gui_manager.hpp's SetSecondaryText comment — small built-in
+    // font, not the custom primary one, specifically so its line_height
+    // is known and small enough to fit above label_ within kRootHeightPx.
+    secondary_label_ = lv_label_create(root_);
+    lv_obj_set_style_text_font(secondary_label_, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_align(secondary_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(secondary_label_, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_text_color(secondary_label_, lv_color_white(), 0);
+    // Explicit, same lesson as label_'s text-color init above: a fresh
+    // lv_label_t defaults to LVGL's own placeholder text ("Text"), not
+    // empty — left alone, that showed up as a real stray line on real
+    // hardware the very first time BreathFace's idle screen rendered
+    // (2026-08-30), because SetSecondaryText("")'s dirty-check compares
+    // against last_secondary_text_'s initial value, which is already ""
+    // — so that very first idle-screen call to clear it looked like a
+    // no-op and never actually reached lv_label_set_text() at all. Only
+    // cleared once some later *real* text ("Ready?") made the tracked
+    // value diverge from the actual on-screen "Text" for the first time.
+    lv_label_set_text(secondary_label_, "");
 
     // Plain static circle, no rotation — see the kRingRadiusPx/kRingWidthPx
     // comment in gui_manager.hpp for why this is safe to make full-size
@@ -65,6 +90,17 @@ void GuiManager::SetPrimaryText(const char* text)
     std::strncpy(last_text_, text, sizeof(last_text_) - 1);
     last_text_[sizeof(last_text_) - 1] = '\0';
     lv_label_set_text(label_, text);
+    ++update_count_;
+}
+
+void GuiManager::SetSecondaryText(const char* text)
+{
+    if (std::strncmp(last_secondary_text_, text, sizeof(last_secondary_text_)) == 0) {
+        return;  // unchanged — same reasoning as SetPrimaryText's dirty-check
+    }
+    std::strncpy(last_secondary_text_, text, sizeof(last_secondary_text_) - 1);
+    last_secondary_text_[sizeof(last_secondary_text_) - 1] = '\0';
+    lv_label_set_text(secondary_label_, text);
     ++update_count_;
 }
 
@@ -101,6 +137,7 @@ void GuiManager::SetWarmth(float warmth)
 void GuiManager::SetAccentColor(lv_color_t color)
 {
     lv_obj_set_style_text_color(label_, color, 0);
+    lv_obj_set_style_text_color(secondary_label_, color, 0);
     lv_obj_set_style_border_color(ring_, color, 0);
 }
 

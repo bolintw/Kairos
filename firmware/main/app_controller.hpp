@@ -15,7 +15,7 @@
 //    centered on -90/0/90/180 (A/B/C/D respectively, set 2026-08-23).
 //    Physical mapping is provisional pending M10 enclosure geometry —
 //    trivial to change later. A=PomodoroFace(25,5), B=PomodoroFace(50,10),
-//    C=StopwatchFace, D=nullptr (see CreateFace).
+//    C=StopwatchFace, D=BreathFace (see CreateFace).
 //
 //    Angle hysteresis (added 2026-08-23, user's drone flight-controller
 //    background): quantization alone would flip-flop if the settled
@@ -77,12 +77,14 @@
 //    overwritten by onEnter()'s reset moments later if a genuine flip is
 //    confirmed anyway).
 //
-// 4. Face D has no defined behavior yet (plan: 待定，暫緩實作). Backed by
-//    ReservedFace (added 2026-08-24) — a placeholder TimerFace that just
-//    renders "Reserved" and no-ops everything else — so a flip to D is
-//    visible on screen instead of indistinguishable from current_ being
-//    null. Revisit once D's functionality is decided; `current_` is no
-//    longer expected to be null in normal operation.
+// 4. Face D's behavior was undecided for a while (plan: 待定，暫緩實作),
+//    backed in the meantime first by ReservedFace (a placeholder that
+//    just rendered "Reserved") and then briefly by a second PomodoroFace
+//    instance for fast iteration on the M7 brightness/notification work.
+//    Settled 2026-08-30: BreathFace, a guided 4-7-8-style breathing
+//    exercise — see its own header for why it's a distinct class rather
+//    than another PomodoroFace variant. `current_` is not expected to be
+//    null in normal operation.
 //
 // 5. Brightness/notification state machine (M7, plan's "亮度作為通知系
 //    統"), driven off TimerFace::Status polled each tick (is_running

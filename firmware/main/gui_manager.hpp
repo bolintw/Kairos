@@ -61,10 +61,19 @@ constexpr int32_t kRingWidthPx = 6;
 // panel so LVGL's software rotation — on either its fast matrix path or
 // the slow per-pixel fallback — stays within a tractable pixel count and
 // (worst case, ARGB8888 fallback) a tractable buffer size
-// (kRootWidthPx*kRootHeightPx*4 ~= 47KB, comfortably under the LVGL heap
-// — see CONFIG_LV_MEM_SIZE_KILOBYTES in sdkconfig).
+// (kRootWidthPx*kRootHeightPx*4 ~= 52KB — see CONFIG_LV_MEM_SIZE_KILOBYTES
+// in sdkconfig, currently 256KB, so this is comfortably small; the crash
+// history above is about the original *240x240* attempt (225KB against a
+// then-64KB heap), not about this container being sized at all — see the
+// height note just below for what actually sets kRootHeightPx now).
 constexpr int32_t kRootWidthPx = 200;
-constexpr int32_t kRootHeightPx = 60;
+// height = primary font's line_height (44) + secondary_label_'s
+// (lv_font_montserrat_18, line_height 21) = 65, exactly, no slack —
+// see SetSecondaryText's comment. Was a plain 60 (room for one line only)
+// until secondary_label_ existed (2026-08-30); grown just enough for the
+// second line, not to some round/generous number, since every extra
+// pixel here is extra ARGB8888 buffer cost per the note above.
+constexpr int32_t kRootHeightPx = 65;
 
 // M7: owns the LVGL widget(s) and the backlight (via LGFX's Light_PWM,
 // injected by reference — DI, no Singleton, matching the rest of the
@@ -116,6 +125,29 @@ public:
 
     void SetPrimaryText(const char* text);
 
+    // A small line above the primary label, same root_ (counter-rotates
+    // together, stays upright with it) — added 2026-08-30 for
+    // BreathFace's phase name ("Inhale"/"Hold"/"Exhale"). First attempt
+    // had the phase name replace the countdown as a fading caption, same
+    // trick as PomodoroFace's Focus/Relax — worked fine for PomodoroFace
+    // (one transition per 25+ minute phase) but at BreathFace's pace (a
+    // new phase every 2-8s) the word-then-number swap itself became the
+    // abrupt thing, on top of the number jump it was meant to soften.
+    // Showing both permanently side by side removes the swap entirely
+    // instead of softening it. Uses a small built-in Montserrat size, not
+    // the custom primary font — originally lv_font_montserrat_14 (reusing
+    // the debug overlay's font, needing no root_ growth at all: 16+44 ==
+    // the then-kRootHeightPx of 60), bumped to lv_font_montserrat_18
+    // the same day once the user found 14 hard to read — its line_height
+    // (21px) plus the primary font's (44px) is exactly kRootHeightPx
+    // (65, grown from 60 for this), so the two labels still stack with
+    // zero slack. root_ growing 5px is a ~5KB larger worst-case rotation
+    // buffer, nowhere near the scale that caused the original 240x240
+    // rotation crashes (see the class comment) — the risk that history
+    // warns about is a buffer sized like the *whole panel*, not a few
+    // extra pixels on an already-small container.
+    void SetSecondaryText(const char* text);
+
     // Primary label's own text opacity, 0-255 — separate from
     // SetBrightness() (backlight PWM, whole-screen) and SetAccentColor()
     // (hue). Added 2026-08-26 for PomodoroFace's phase-transition caption
@@ -136,10 +168,12 @@ public:
     // and sufficient for a single-color text label.
     void SetWarmth(float warmth);
 
-    // Accent color (2026-08-25): sets BOTH the primary label's text color
-    // and the outer ring's border color to the same value — TimerFace
-    // subclasses call this from render() to communicate face/phase
-    // identity (focus=red, break=green, count-up=blue) now that the
+    // Accent color (2026-08-25, extended 2026-08-30 to the secondary
+    // label too): sets the primary label's text color, the secondary
+    // label's text color, AND the outer ring's border color to the same
+    // value — TimerFace subclasses call this from render() to
+    // communicate face/phase identity (focus=red, break=green,
+    // count-up=blue, breathe phases=green/gold/violet) now that the
     // primary text itself is numbers-only. Independent of SetWarmth()
     // above (still unused, kept in case a separate tint channel comes
     // back) and independent of SetBrightness() (backlight PWM, not pixel
@@ -187,6 +221,7 @@ private:
     // when something visibly changed: ticking seconds settle to ~1
     // redraw/sec on their own, a stationary angle settles to ~0.
     char last_text_[32] = "";
+    char last_secondary_text_[16] = "";
     int32_t last_rotation_0p1_deg_ = 0;
     bool has_last_rotation_ = false;
     uint8_t last_ring_opa_ = 0;
@@ -197,6 +232,7 @@ private:
 
     LGFX& lcd_;
     lv_obj_t* root_;
+    lv_obj_t* secondary_label_;
     lv_obj_t* label_;
     lv_obj_t* ring_;
 };
