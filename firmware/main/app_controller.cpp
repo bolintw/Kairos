@@ -60,11 +60,12 @@ constexpr uint32_t kTapMuteAfterSwitchMs = 500;
 // end-of-phase ramp as a second "approaching the end" cue — dropped
 // 2026-08-26: the ring was already always solid-255 while paused, so
 // during that 30s window a paused ring and a merely-running-near-the-end
-// ring looked identical, and pausing inside it was invisible ("看不出來有
-// 沒有觸發"). The ring now means exactly one thing at any of these
-// thresholds — paused — plus this one breathing window as a distinct
-// "about to end" cue while still running; the wider approach-cue lives
-// only in brightness now (kFocusEndRampWindowMs above).
+// ring looked identical, and pausing inside it was invisible (couldn't
+// tell whether it had actually triggered). The ring now means exactly
+// one thing at any of these thresholds — paused — plus this one
+// breathing window as a distinct "about to end" cue while still
+// running; the wider approach-cue lives only in brightness now
+// (kFocusEndRampWindowMs above).
 constexpr uint32_t kRingBreathWindowSec = 5;
 // A hard on/off blink (2026-08-25 first version) read as too harsh on
 // hardware — replaced same day with a smooth breathing fade between this

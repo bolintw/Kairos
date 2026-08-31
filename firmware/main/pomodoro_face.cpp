@@ -6,7 +6,7 @@
 #include "gui_manager.hpp"
 
 namespace {
-// Accent colors (2026-08-25 "UI 調整" pass): focus=red, break=green — the
+// Accent colors (2026-08-25 "UI polish" pass): focus=red, break=green — the
 // primary text dropped its "Focus"/"Break" word prefix in favor of color
 // alone carrying that distinction, applied to both the label and the
 // outer ring via GuiManager::SetAccentColor().

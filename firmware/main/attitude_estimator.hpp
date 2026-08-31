@@ -8,7 +8,8 @@
 // angle and whether it's currently moving. Deliberately knows nothing
 // about "faces" — which angle range means which TimerFace, and the
 // hysteresis/debounce needed before switching, are AppController's job
-// (it already owns "統一管理姿態判斷（hysteresis）" per the plan). This
+// (it already owns "centralized attitude-decision (hysteresis)
+// management" per the plan). This
 // class just answers "what angle, how confidently, is it settled" —
 // AppController is the one that decides what that angle *means*.
 //
@@ -145,13 +146,16 @@ private:
 
     // Single-pole low-pass on the raw accel/gyro samples, applied before
     // anything else in Update() (2026-08-25, the plan's long-deferred
-    // "一階濾波" idea — see git history for why it was put off until
+    // "first-order filter" idea — see git history for why it was put off until
     // real jitter was measured on hardware). Standard EMA:
-    // x = new_x*kLowPassAlpha + x*(1-kLowPassAlpha), seeded from the
-    // first real sample (has_filtered_sample_) rather than 0 so there's
-    // no startup transient. A separate alpha from kComplementaryAlpha —
-    // this smooths the raw inputs, that blends gyro-integration against
-    // accel for the output angle; don't confuse the two.
+    // x = new_x*alpha + x*(1-alpha), seeded from the first real sample
+    // (has_filtered_sample_) rather than 0 so there's no startup
+    // transient. Accel and gyro use separate alphas (kAccelLowPassAlpha/
+    // kGyroLowPassAlpha, split 2026-08-31 — see their comment) despite
+    // sharing this same field-level design; both are also separate from
+    // kComplementaryAlpha — these smooth the raw inputs, that blends
+    // gyro-integration against accel for the output angle; don't confuse
+    // the two kinds.
     float filtered_accel_g_[3] = {0.0f, 0.0f, 0.0f};
     float filtered_gyro_dps_[3] = {0.0f, 0.0f, 0.0f};
     bool has_filtered_sample_ = false;

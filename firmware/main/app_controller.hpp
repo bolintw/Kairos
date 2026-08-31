@@ -77,7 +77,7 @@
 //    overwritten by onEnter()'s reset moments later if a genuine flip is
 //    confirmed anyway).
 //
-// 4. Face D's behavior was undecided for a while (plan: 待定，暫緩實作),
+// 4. Face D's behavior was undecided for a while (plan: undecided, deferred),
 //    backed in the meantime first by ReservedFace (a placeholder that
 //    just rendered "Reserved") and then briefly by a second PomodoroFace
 //    instance for fast iteration on the M7 brightness/notification work.
@@ -86,10 +86,11 @@
 //    than another PomodoroFace variant. `current_` is not expected to be
 //    null in normal operation.
 //
-// 5. Brightness/notification state machine (M7, plan's "亮度作為通知系
-//    統"), driven off TimerFace::Status polled each tick (is_running
-//    true->false/false->true, remaining_ms jumping up = a new phase
-//    started) PLUS attitude.is_moving (added 2026-08-25) — a single
+// 5. Brightness/notification state machine (M7, plan's "brightness as
+//    the notification system"), driven off TimerFace::Status polled
+//    each tick (is_running true->false/false->true, remaining_ms
+//    jumping up = a new phase started) PLUS attitude.is_moving (added
+//    2026-08-25) — a single
 //    `interacting` flag folds all of these together: "the user is
 //    engaging with the device right now", whether that's tapping,
 //    flipping faces, or just spinning it in their hand without crossing
@@ -161,7 +162,7 @@
 //    call) — those shape what counts as a tap at all, this just ignores
 //    genuine taps for a moment after a flip.
 //
-// 7. Outer ring (2026-08-25, "UI 調整" pass, revised 2026-08-26): a
+// 7. Outer ring (2026-08-25, "UI polish" pass, revised 2026-08-26): a
 //    second notification channel alongside brightness — GuiManager's
 //    ring_ (see its header). Purely a function of the current
 //    TimerFace::Status snapshot each tick, no elapsed-time state of its

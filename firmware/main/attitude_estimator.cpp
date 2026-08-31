@@ -13,7 +13,8 @@ constexpr float kRadToDeg = 180.0f / kPi;
 constexpr float kGyroMovingThresholdDps = 20.0f;
 constexpr float kAzInvalidThresholdG = 0.3f;
 // History: 0.98 -> 0.5 -> 0.8 -> 0.95 -> 0.9 (2026-08-24, final for now).
-// 0.98 took ~17s to converge (matched the "十幾秒" hardware report). 0.5
+// 0.98 took ~17s to converge (matched the earlier "low tens of seconds"
+// hardware report). 0.5
 // converged fast (~0.5s) but felt too accel-dominant/vibration-sensitive.
 // 0.8 was a middle ground (~1.5s). Once the gyro full-scale-range bug was
 // fixed (CTRL3 scale now correctly matches +-256dps, see qmi8658.hpp),
@@ -25,17 +26,36 @@ constexpr float kAzInvalidThresholdG = 0.3f;
 constexpr float kComplementaryAlpha = 0.9f;  // weight on gyro-integrated angle
 
 // Single-pole low-pass on the raw samples — see the header's field
-// comment. 0.8 -> 0.2 -> 0.4 -> 0.6 (0.8/0.2/0.4 on 2026-08-25, 0.6 on
-// 2026-08-26 after enclosure testing). 0.8 was backwards from the
-// intended smoothing strength (~5ms tau, barely any effect). 0.2 (~37ms
-// tau) visibly steadied the resting jitter but made active rotation
-// noticeably laggier. 0.4 (~16ms tau) traded back some smoothing for
-// responsiveness but still read as sluggish once tested mounted in the
-// finished enclosure rather than hand-held. 0.6 (~9ms tau at 120Hz)
-// continues that same direction — if this now reads as jittery/noisy
-// instead of laggy, that's the tradeoff to dial back against; adjust
-// further in either direction on hardware if this balance isn't right.
-constexpr float kLowPassAlpha = 0.6f;
+// comment. Was one shared kLowPassAlpha for both accel and gyro through
+// 0.8 -> 0.2 -> 0.4 -> 0.6 (0.8/0.2/0.4 on 2026-08-25, 0.6 on 2026-08-26
+// after enclosure testing: 0.8 was backwards from the intended smoothing
+// strength ~5ms tau, barely any effect; 0.2 ~37ms tau visibly steadied
+// resting jitter but made active rotation noticeably laggier; 0.4 ~16ms
+// tau traded back some smoothing for responsiveness but still read as
+// sluggish mounted in the enclosure; 0.6 ~9ms tau continued that
+// direction). Split into two separate constants 2026-08-31: with a
+// single shared value, pushing gyro's alpha up for responsiveness forced
+// accel's noise immunity down right along with it, even though accel
+// only ever contributes kComplementaryAlpha's 10%-per-tick correction —
+// it was never the signal driving felt responsiveness, so there was no
+// reason its filtering had to track gyro's. That coupling is very
+// likely why hand-held vibration started reading as "a bad angle that
+// takes a while to recover from" around the same time — accel's own
+// filtering had gotten weaker as a side effect of chasing gyro
+// responsiveness, not because accel itself needed to respond faster.
+//
+// kGyroLowPassAlpha: 0.6 -> 0.75 (2026-08-31, ~9ms -> ~6ms tau at
+// 120Hz) — still felt a bit laggy at 0.6 once separated from accel;
+// this is deliberately near the low-filtering end of what's been tried,
+// since gyro drives essentially all of the felt rotation responsiveness
+// (see kComplementaryAlpha's 90/10 split above).
+constexpr float kGyroLowPassAlpha = 0.75f;
+// kAccelLowPassAlpha: 0.6 -> 0.2 (2026-08-31, back to the value that
+// felt too laggy in the old *shared* scheme — not laggy here, since
+// accel was never the fast-response signal to begin with). ~37ms tau:
+// heavier smoothing specifically to reject the vibration/shock content
+// blamed above, at essentially no cost to rotation feel.
+constexpr float kAccelLowPassAlpha = 0.2f;
 
 float LowPass(float new_x, float old_x, float alpha)
 {
@@ -104,11 +124,11 @@ AttitudeEstimator::Output AttitudeEstimator::Update(const Sample& sample, uint32
     // Low-pass the raw sample first — everything below reads the
     // filtered values, never the raw sample directly. See the header's
     // field comment for why (and for kComplementaryAlpha vs
-    // kLowPassAlpha being two different things).
+    // kGyroLowPassAlpha/kAccelLowPassAlpha being different things).
     if (has_filtered_sample_) {
         for (int i = 0; i < 3; ++i) {
-            filtered_accel_g_[i] = LowPass(sample.accel_g[i], filtered_accel_g_[i], kLowPassAlpha);
-            filtered_gyro_dps_[i] = LowPass(sample.gyro_dps[i], filtered_gyro_dps_[i], kLowPassAlpha);
+            filtered_accel_g_[i] = LowPass(sample.accel_g[i], filtered_accel_g_[i], kAccelLowPassAlpha);
+            filtered_gyro_dps_[i] = LowPass(sample.gyro_dps[i], filtered_gyro_dps_[i], kGyroLowPassAlpha);
         }
     } else {
         for (int i = 0; i < 3; ++i) {

@@ -3,7 +3,7 @@
 #include "lgfx_config.hpp"
 #include "lvgl.h"
 
-// Space Grotesk Bold, 40px, full printable ASCII (2026-08-25 "UI 調整"
+// Space Grotesk Bold, 40px, full printable ASCII (2026-08-25 "UI polish"
 // pass — LVGL's built-in Montserrat has no bold weight and was judged not
 // elegant enough for the primary display). Generated via lv_font_conv
 // from reference/vendor/fonts/SpaceGrotesk-Bold.ttf — SIL OFL 1.1,
@@ -41,7 +41,7 @@ constexpr const lv_font_t* kPrimaryFont = &font_space_grotesk_bold_40;
 // Panel is 240x240 (see lgfx_config.hpp / main.cpp's lv_display_create).
 constexpr int32_t kPanelSizePx = 240;
 
-// Outer ring (2026-08-25, "UI 調整" pass): a plain circular border, shown
+// Outer ring (2026-08-25, "UI polish" pass): a plain circular border, shown
 // while paused / near a phase's end, hidden while running mid-phase — see
 // AppController's UpdateRing() for the actual show/hide/blink policy, this
 // is just the geometry. Sized close to the panel edge with a bit of
@@ -163,7 +163,8 @@ public:
     void SetBrightness(float brightness);
 
     // warmth: 0.0 (normal/white text) to 1.0 (fully warm/red) — the
-    // "尾聲脈動...色調偏暖/紅" notification. Linear RGB interpolation
+    // "end-of-phase pulse... shifts toward a warm/red tint" notification.
+    // Linear RGB interpolation
     // between white and a warm red, not true HSV hue rotation — simple
     // and sufficient for a single-color text label.
     void SetWarmth(float warmth);

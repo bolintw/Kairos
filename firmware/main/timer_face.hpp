@@ -12,11 +12,12 @@ class GuiManager;  // forward-declared — concrete rendering is out of
 class TimerFace {
 public:
     // Added 2026-08-23 for M7's brightness/notification logic (plan's
-    // "亮度作為通知系統"): AppController needs to know whether the face
-    // is running (漸暗 starts on run, 暫停轉亮 on pause — detected by
-    // AppController watching is_running edges tick to tick, not a
-    // dedicated "just started" flag here) and, if it has a target
-    // duration, how much is left (尾聲提示). StopwatchFace has no
+    // "brightness as the notification system"): AppController needs to
+    // know whether the face is running (dims on run, brightens on pause
+    // — detected by AppController watching is_running edges tick to
+    // tick, not a dedicated "just started" flag here) and, if it has a
+    // target duration, how much is left (for an end-of-phase cue).
+    // StopwatchFace has no
     // target, so has_target=false and remaining_ms is meaningless.
     // is_break_phase (added 2026-08-25) lets AppController tell a
     // "focus-like" phase (fades while running, ramps to full bright near

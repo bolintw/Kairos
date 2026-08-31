@@ -38,7 +38,7 @@ private:
     uint32_t remaining_ms_ = 0;
     bool running_ = false;
 
-    // Phase-transition caption (2026-08-26, "UI 調整" pass): render()
+    // Phase-transition caption (2026-08-26, "UI polish" pass): render()
     // shows "Focus"/"Relax" instead of the MM:SS countdown for
     // kTransitionMs after AdvancePhase() fires, then falls back to the
     // numeric display on its own. Deliberately decremented in onTick()
