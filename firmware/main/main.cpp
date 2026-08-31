@@ -208,7 +208,8 @@ extern "C" void app_main(void)
     // no physical tap). Discard it here so the count starts clean.
     (void)imu.PollTapEvent();
 
-    static AttitudeEstimator attitude_estimator(calibration.face_a_offset_deg);
+    static AttitudeEstimator attitude_estimator(calibration.face_a_offset_deg, calibration.accel_bias_g[0],
+                                                 calibration.accel_bias_g[1]);
     {
         // Gyro bias comes from the saved calibration (see
         // RunCalibrationMode), not a fresh live read here: this device

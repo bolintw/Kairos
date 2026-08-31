@@ -95,7 +95,23 @@ public:
     // reference is) — a sensor-calibration concern, not a face-semantics
     // one, so it stays here rather than moving to AppController. Defaults
     // to 0; revisit once real hardware calibration is needed.
-    explicit AttitudeEstimator(float face_a_offset_deg = 0.0f);
+    //
+    // accel_bias_g: X/Y zero-offset of the accelerometer itself
+    // (2026-08-31) — a different error from face_a_offset_deg above.
+    // That offset only corrects *rotation* (where angle 0 points); this
+    // corrects a fixed translation in the raw (ax,ay) reading that stays
+    // constant in sensor-frame regardless of orientation. Left
+    // uncorrected, screen_angle_deg's error isn't uniform across faces —
+    // small near wherever face_a_offset_deg happened to null it out at
+    // calibration time, larger elsewhere, worst near the opposite side of
+    // the rotation (confirmed on hardware, 2026-08-30: B ~0.8 deg off, A
+    // ~3.7, C ~5.7, D ~9.6 — not a flat offset, growing with angular
+    // distance from B). Subtracted from filtered_accel_g_[0]/[1] before
+    // every AngleFromAccel() call, both here and in SeedInitialAngle().
+    // Measured via RunCalibrationMode's multi-orientation circle-center
+    // fit, not derivable from a single reading the way
+    // face_a_offset_deg is.
+    explicit AttitudeEstimator(float face_a_offset_deg = 0.0f, float accel_bias_x_g = 0.0f, float accel_bias_y_g = 0.0f);
 
     // Call once per sensor tick. dt_ms is elapsed time since the previous
     // call, used for both the gyro integration and the complementary
@@ -122,6 +138,8 @@ public:
 
 private:
     float face_a_offset_deg_;
+    float accel_bias_x_g_;
+    float accel_bias_y_g_;
     float gyro_bias_dps_[3] = {0.0f, 0.0f, 0.0f};
     float angle_deg_ = 0.0f;  // last output angle, already offset-corrected
 

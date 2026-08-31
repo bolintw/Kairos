@@ -75,8 +75,10 @@ float AngleFromAccel(float ax, float ay, float face_a_offset_deg)
 
 }  // namespace
 
-AttitudeEstimator::AttitudeEstimator(float face_a_offset_deg)
-    : face_a_offset_deg_(face_a_offset_deg)
+AttitudeEstimator::AttitudeEstimator(float face_a_offset_deg, float accel_bias_x_g, float accel_bias_y_g)
+    : face_a_offset_deg_(face_a_offset_deg),
+      accel_bias_x_g_(accel_bias_x_g),
+      accel_bias_y_g_(accel_bias_y_g)
 {
 }
 
@@ -93,7 +95,8 @@ void AttitudeEstimator::SeedInitialAngle(const Sample& sample)
     if (!in_valid_plane) {
         return;  // leave angle_deg_ at its default; Update() converges normally
     }
-    angle_deg_ = AngleFromAccel(sample.accel_g[0], sample.accel_g[1], face_a_offset_deg_);
+    angle_deg_ = AngleFromAccel(sample.accel_g[0] - accel_bias_x_g_, sample.accel_g[1] - accel_bias_y_g_,
+                                 face_a_offset_deg_);
 }
 
 AttitudeEstimator::Output AttitudeEstimator::Update(const Sample& sample, uint32_t dt_ms)
@@ -130,7 +133,8 @@ AttitudeEstimator::Output AttitudeEstimator::Update(const Sample& sample, uint32
     const bool in_valid_plane = std::fabs(filtered_accel_g_[2]) < kAzInvalidThresholdG;
 
     if (in_valid_plane) {
-        const float angle_from_accel = AngleFromAccel(filtered_accel_g_[0], filtered_accel_g_[1], face_a_offset_deg_);
+        const float angle_from_accel = AngleFromAccel(filtered_accel_g_[0] - accel_bias_x_g_,
+                                                        filtered_accel_g_[1] - accel_bias_y_g_, face_a_offset_deg_);
         angle_deg_ = BlendTowardAngle(angle_from_gyro, angle_from_accel, 1.0f - kComplementaryAlpha);
     } else {
         // Accel isn't trustworthy while the screen isn't facing the
