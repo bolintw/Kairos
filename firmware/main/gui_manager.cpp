@@ -25,6 +25,14 @@ GuiManager::GuiManager(LGFX& lcd)
     lv_obj_remove_style_all(root_);  // no border/padding/scrollbar — just a rotation anchor
     lv_obj_set_size(root_, kRootWidthPx, kRootHeightPx);
     lv_obj_set_pos(root_, (kPanelSizePx - kRootWidthPx) / 2, (kPanelSizePx - kRootHeightPx) / 2);
+    // root_ is a rotation pivot, not a visual mask (see the class doc) —
+    // by default LVGL still clips children to its box, which silently cut
+    // off the top of any primary text that wraps to 2 lines (kRootHeightPx
+    // is sized for kPrimaryFont's single-line height, see below; two lines
+    // is 2x that). Caught via calibration_mode.cpp's "Rotate\nand hold"
+    // (2026-09-01) — this flag makes root_ a plain rotation anchor with no
+    // clipping, matching what it's actually for.
+    lv_obj_add_flag(root_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_set_style_transform_pivot_x(root_, kRootWidthPx / 2, 0);
     lv_obj_set_style_transform_pivot_y(root_, kRootHeightPx / 2, 0);
 

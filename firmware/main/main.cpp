@@ -171,16 +171,17 @@ extern "C" void app_main(void)
 
     printf("LVGL running\n");
 
-    // M6: AppController owns attitude-driven face switching (via
-    // AttitudeEstimator::Output, computed below) plus tap routing and
-    // TimerFace lifecycle. See app_controller.hpp for the design.
-    static GuiManager gui_manager(lcd);
-    static AppController app_controller(gui_manager);
-
     // Deliberately NOT rotating with the primary label (see
     // gui_manager.hpp's screen counter-rotation note) — stays a plain
     // fixed child of lv_screen_active() for now, after the fully-rotating
-    // version crashed twice on hardware.
+    // version crashed twice on hardware. Created *before* GuiManager below
+    // (2026-09-01, was after) so root_'s children end up later in
+    // lv_screen_active()'s child list and therefore draw on top of this
+    // overlay, not under it — with an unchanged order, calibration mode's
+    // two-line "Rotate\nand hold" grew tall enough to reach up into the
+    // overlay's on-screen area and the overlay (drawn later = on top)
+    // visibly cut into the top of "Rotate" (caught on hardware). Pure
+    // z-order fix, no positions/sizes changed.
     lv_obj_t* label = nullptr;
     if (kDebugOverlayEnabled) {
         label = lv_label_create(lv_screen_active());
@@ -190,6 +191,12 @@ extern "C" void app_main(void)
         lv_label_set_text(label, "waiting for IMU...");
         lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 30);
     }
+
+    // M6: AppController owns attitude-driven face switching (via
+    // AttitudeEstimator::Output, computed below) plus tap routing and
+    // TimerFace lifecycle. See app_controller.hpp for the design.
+    static GuiManager gui_manager(lcd);
+    static AppController app_controller(gui_manager);
 
     // M3/M4 debug overlay: raw accel/gyro readout plus tap count.
     static Qmi8658 imu(GPIO_NUM_6, GPIO_NUM_7);
