@@ -21,9 +21,49 @@ constexpr float kAzInvalidThresholdG = 0.3f;
 // the overshoot that motivated trusting accel more went away, and 0.95
 // felt close to the user's prior flight-controller tuning experience —
 // but tuned down slightly to 0.9 on further hardware testing, still
-// gyro-dominant (90% gyro / 10% accel per tick) but with a touch more
-// accel correction than 0.95.
-constexpr float kComplementaryAlpha = 0.9f;  // weight on gyro-integrated angle
+// gyro-dominant with a touch more accel correction than 0.95.
+// 0.9 -> 0.8 (2026-09-01, alongside the adaptive weighting just below):
+// this value now only governs the at-rest end of the ramp (see
+// AccelTrustWeight) rather than a flat per-tick weight during motion too,
+// and kAccelLowPassAlpha's heavy smoothing (~37ms tau) means the
+// stationary accel reading it's blending toward is much steadier than
+// when this was last tuned — safe to trust it more once genuinely still,
+// which shortens the final settle-in after a flip. Confirmed on hardware.
+constexpr float kComplementaryAlpha = 0.8f;  // weight on gyro-integrated angle, at rest (see AccelTrustWeight)
+
+// Adaptive complementary filter (2026-09-01): (1 - kComplementaryAlpha)
+// above is no longer applied as a flat per-tick accel weight — it's now
+// the weight used only once the device is essentially stationary, scaled
+// down toward 0 as rotation speeds up. Reasoning: the accel weight isn't
+// really "how much do we trust accel" in the abstract, it's "how close is
+// filtered_accel_g_ to the device's actual current orientation right
+// now" — and kAccelLowPassAlpha's heavy smoothing (~37ms tau, see its own
+// comment) means that gap grows with rotation speed, not just existing
+// at some fixed size. Blending a fixed 10%/tick toward a value that lags
+// further behind during a fast flip pulls the (accurate, fast) gyro
+// track backward the whole time the device is moving — read on hardware
+// as a consistent ~5 degree undershoot on quick 90-degree flips, then a
+// visible "damped" ease-in to the correct angle over the following
+// ~100-150ms (roughly kAccelLowPassAlpha's settling time) once gyro rate
+// drops back to ~0 and the blend keeps nudging toward accel's now-caught-
+// up value. Trusting accel less while |gz| is high sidesteps pulling
+// toward a value known to be stale, without touching
+// kGyroLowPassAlpha/kAccelLowPassAlpha themselves (different concern —
+// those smooth a single tick's raw sample, this decides whether THIS
+// tick's accel-derived angle should factor into the output at all).
+// kGyroSpeedFullTrustDps/kGyroSpeedZeroTrustDps are the new tuning knobs;
+// initial guesses, not yet validated on hardware like the constants
+// above were — watch the debug overlay's gz reading during a normal flip
+// to sanity-check where they should sit.
+constexpr float kGyroSpeedFullTrustDps = 5.0f;   // below this, treat as
+                                                   // stationary: full
+                                                   // (1-kComplementaryAlpha)
+                                                   // accel weight, same as
+                                                   // the old fixed behavior
+constexpr float kGyroSpeedZeroTrustDps = 60.0f;  // at/above this, accel
+                                                   // weight -> 0: trust
+                                                   // gyro alone while
+                                                   // genuinely rotating
 
 // Single-pole low-pass on the raw samples — see the header's field
 // comment. Was one shared kLowPassAlpha for both accel and gyro through
@@ -82,6 +122,23 @@ float BlendTowardAngle(float base, float target, float target_weight)
 float GyroMagnitudeDps(float gx, float gy, float gz)
 {
     return std::sqrt(gx * gx + gy * gy + gz * gz);
+}
+
+// See kGyroSpeedFullTrustDps/kGyroSpeedZeroTrustDps's comment for why this
+// exists. Linear ramp from full trust (kComplementaryAlpha's usual
+// 1-kComplementaryAlpha weight) at/below kGyroSpeedFullTrustDps, down to
+// zero trust at/above kGyroSpeedZeroTrustDps. gz_abs_dps is the in-plane
+// rotation axis specifically (not the 3-axis GyroMagnitudeDps above,
+// which mixes in off-axis GX/GY meant for a different question — "is the
+// device being picked up" — this is about how fast the tracked angle
+// itself is currently changing).
+float AccelTrustWeight(float gz_abs_dps)
+{
+    float trust = 1.0f - (gz_abs_dps - kGyroSpeedFullTrustDps) /
+                              (kGyroSpeedZeroTrustDps - kGyroSpeedFullTrustDps);
+    if (trust < 0.0f) trust = 0.0f;
+    if (trust > 1.0f) trust = 1.0f;
+    return (1.0f - kComplementaryAlpha) * trust;
 }
 
 // Shared by Update() and SeedInitialAngle() — same formula, see the
@@ -155,7 +212,7 @@ AttitudeEstimator::Output AttitudeEstimator::Update(const Sample& sample, uint32
     if (in_valid_plane) {
         const float angle_from_accel = AngleFromAccel(filtered_accel_g_[0] - accel_bias_x_g_,
                                                         filtered_accel_g_[1] - accel_bias_y_g_, face_a_offset_deg_);
-        angle_deg_ = BlendTowardAngle(angle_from_gyro, angle_from_accel, 1.0f - kComplementaryAlpha);
+        angle_deg_ = BlendTowardAngle(angle_from_gyro, angle_from_accel, AccelTrustWeight(std::fabs(gz)));
     } else {
         // Accel isn't trustworthy while the screen isn't facing the
         // user — fall back to pure gyro integration for this tick.
