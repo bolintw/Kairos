@@ -24,11 +24,13 @@ filter and read back later (`git log --author="Claude Sonnet 5"`).
 
 The device has no fixed "up" — the screen always faces you, and you rotate
 it in your hand like a dial. Four quadrants (A/B/C/D) each hold a different
-timer face; rotating past a hysteresis threshold switches which one is
-active. A single tap toggles start/pause on whichever face is showing.
-Screen brightness itself doubles as the notification channel — it fades
-during a focus session, snaps back on any interaction, and ramps up again
-as a phase is about to end — since there's no speaker or vibration motor.
+timer face — two Pomodoro variants, a stopwatch, and a guided 4-7-8
+breathing exercise — rotating past a hysteresis threshold switches which
+one is active. A single tap toggles start/pause on whichever face is
+showing. Screen brightness itself doubles as the notification channel — it
+fades during a focus session, snaps back on any interaction, and ramps up
+again as a phase is about to end — since there's no speaker or vibration
+motor.
 
 ## Building
 
@@ -44,9 +46,13 @@ idf.py -p <PORT> flash monitor
 
 ## Status
 
-Actively developed, not yet in an enclosure. See the milestone list and
-design notes inline in the source (`firmware/main/*.hpp` design comments
-carry a lot of the "why", not just the "what").
+Actively developed and now assembled in an enclosure, running on battery.
+Current focus is power budget work toward deep sleep — active current
+draw is measured (tens of mA range, dominated by a fixed CPU/display
+baseline rather than the backlight), and the wake path is designed around
+the IMU's native Wake-on-Motion mode rather than software polling. See the
+milestone list and design notes inline in the source (`firmware/main/*.hpp`
+design comments carry a lot of the "why", not just the "what").
 
 ## License
 
