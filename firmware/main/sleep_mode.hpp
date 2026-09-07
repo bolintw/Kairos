@@ -6,18 +6,17 @@
 // AppController::ShouldEnterIdleSleep() goes true, i.e. the screen has
 // already faded fully off and held there for a bit (see
 // app_controller.hpp design note 9). Repeatedly sleeps (real light sleep,
-// woken by either a tap on IMU_INT2 or a ~1s backstop timer — see the
-// .cpp) and polls for a tap in between, returning as soon as one is
-// detected.
+// woken by either a Wake-on-Motion event on IMU_INT2 or a ~1s backstop
+// timer — see the .cpp) and polls for one in between, returning as soon
+// as one is detected.
 //
-// Tap-only wake (2026-09-06, was tap-or-rotation): the caller must have
-// already switched the IMU into accel-only Low Power mode
-// (Qmi8658::SetLowPowerAccelOnly(true)) before calling this — gyro's own
-// current draw barely depends on ODR (see that method's comment), so
-// disabling it entirely was the only real lever for getting idle current
-// down, and it means there's no gyro sample to check a rotation against
-// here anymore. Restoring normal 6DOF mode afterward is also the
-// caller's job.
+// Wake-on-Motion, not tap (2026-09-06, wom-wake-mode branch — was
+// tap-engine-based on main): the caller must have already switched the
+// IMU into WoM mode (Qmi8658::EnterWakeOnMotion()) before calling this —
+// see that method's comment for why (in short: a real tap's INT2 signal
+// is too brief a pulse for light sleep's GPIO wakeup to reliably catch;
+// WoM's is a held level instead). Restoring the tap engine afterward is
+// the caller's job (ExitWakeOnMotion() + a fresh ConfigureTap() call).
 //
 // Calls esp_light_sleep_start() directly in a loop, with a real GPIO
 // wakeup source on IMU_INT2 (2026-09-06, was a plain vTaskDelay() nap
@@ -43,12 +42,15 @@
 // other object in the app (current_'s face/phase/remaining time,
 // AttitudeEstimator's angle) is simply still there when this returns —
 // no state to save/restore. See gravity_timer_project_plan.md's M9 notes
-// for the full comparison against deep sleep + Wake-on-Motion (blocked:
-// IMU_INT1/INT2 aren't wired to an RTC-capable GPIO, and the board's
-// header doesn't expose them for a bodge wire either) and deep sleep +
-// ULP-RISC-V bit-bang I2C (works, but far more implementation/debugging
-// cost for savings that are hard to feel against this path's
-// already-200x-plus improvement).
+// for the full comparison against *deep* sleep + Wake-on-Motion
+// (blocked: IMU_INT1/INT2 aren't wired to an RTC-capable GPIO, and the
+// board's header doesn't expose them for a bodge wire either — that
+// restriction is specific to deep sleep's ext0/ext1 wakeup, which only
+// looks at RTC GPIOs; light sleep's GPIO wakeup used here has no such
+// restriction, which is exactly why WoM is usable at all in this
+// project) and deep sleep + ULP-RISC-V bit-bang I2C (works, but far more
+// implementation/debugging cost for savings that are hard to feel
+// against this path's already-200x-plus improvement).
 //
 // Touches nothing on screen — the display is already off by the time
 // AppController calls this, and nothing here should light it back up

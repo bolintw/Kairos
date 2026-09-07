@@ -55,13 +55,17 @@ constexpr uint32_t kSleepBackstopMs = 1000;
 // is called directly, synchronously, in this task, so err and
 // esp_sleep_get_wakeup_cause() are read right where they're produced —
 // no opaque idle-task-context callback in between (removes failure 2's
-// diagnostic blind spot). If GPIO48 does turn out to be high at the wrong
-// times, this degrades gracefully instead of crashing or hanging: a
-// rejected sleep just falls through to the existing PollTapEvent() I2C
-// poll below (STATUS1/TAP_STATUS are latched until read, so a real tap's
-// flag is still there even if the pulse itself already passed) and a
-// short vTaskDelay() backoff, functionally similar to the old plain-poll
-// version rather than worse.
+// diagnostic blind spot). Confirmed on real hardware afterward: err=0,
+// cause=4 (ESP_SLEEP_WAKEUP_TIMER) every single cycle, current a stable
+// ~0.82mA — light sleep itself is genuinely healthy now. What it also
+// showed: cause was *never* 7 (ESP_SLEEP_WAKEUP_GPIO), across several
+// real taps — every wake fell through to the 1s timer backstop instead.
+// That's what motivated switching from the tap engine to Wake-on-Motion
+// (2026-09-06, wom-wake-mode branch) as the wakeup signal — see
+// qmi8658.hpp's EnterWakeOnMotion()/PollWomEvent() and main.cpp's
+// idle-sleep block for the IMU-side half of this change; a tap's INT2
+// pulse is brief, a WoM event's is a held level, and only the latter is
+// the shape light sleep's GPIO wakeup can reliably catch.
 void RunIdleSleep(Qmi8658& imu)
 {
     gpio_config_t cfg = {};
@@ -89,15 +93,12 @@ void RunIdleSleep(Qmi8658& imu)
         printf("SLEEP,err=%d,cause=%d,int2=%d\n", static_cast<int>(err),
                static_cast<int>(esp_sleep_get_wakeup_cause()), gpio_get_level(kImuInt2Gpio));
 
-        // Tap-only wake (2026-09-06) — gyro is disabled for the duration
-        // of this call (see main.cpp's SetLowPowerAccelOnly(true) call
-        // just before this), so there's no gyro-magnitude check to make
-        // here anymore. See qmi8658.hpp's SetLowPowerAccelOnly() comment
-        // for why: gyro's own current draw barely depends on ODR, so
-        // disabling it entirely is the only real lever for cutting idle
-        // current, and losing rotation-based wake while asleep was an
-        // accepted trade-off for that.
-        if (imu.PollTapEvent() != Qmi8658::TapEvent::kNone) {
+        // Wake-on-Motion (2026-09-06, wom-wake-mode branch — was
+        // PollTapEvent()) — gyro is disabled for the duration of this
+        // call (see main.cpp's EnterWakeOnMotion() call just before
+        // this), so there's no gyro-magnitude check to make here anymore,
+        // same as the tap-based version this replaced.
+        if (imu.PollWomEvent()) {
             break;
         }
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -54,13 +55,89 @@ public:
             return;
         }
 
+        // Soft reset (2026-09-07, wom-wake-mode branch) — added after a
+        // WoM debugging session (main.cpp's WOM_EDGE_TEST) that captured
+        // zero GPIO edges on either INT pin across many real taps, with
+        // no obvious register-level explanation. This chip is a separate
+        // I2C device that a re-flash or ESP32 reset does *not* reset —
+        // after a full day of repeated Enter/ExitWakeOnMotion and tap-
+        // engine reconfiguration cycles across many test iterations
+        // without a real power cycle in between, there was no guarantee
+        // it was still in a clean, known state by the time any of that
+        // testing started. Datasheet Section 5.9/7.4 (Table 27): write
+        // 0xB0 to RESET (0x60) — the datasheet's own prose section (7.4)
+        // actually says "0x0B" for the same operation, contradicting its
+        // own register table (5.9); went with 0xB0, cross-checked against
+        // lewisxhe/SensorLib (QMI8658_REG_RESET_DEFAULT), the same
+        // community driver this file's tap-engine protocol was ported
+        // from. Confirmed via RSTResult (0x4D) reading 0x80 on success;
+        // up to 15ms for the process per the datasheet, polled here with
+        // margin. Not gated behind dev_ the way other methods are — this
+        // runs before dev_ semantically "exists" as a working device from
+        // this class's perspective, but the handle itself is already
+        // valid at this point.
+        WriteReg(kRegReset, 0xB0);
+        bool reset_ok = false;
+        for (int i = 0; i < 20; ++i) {  // ~200ms at 10ms/iteration, well past the documented 15ms max
+            vTaskDelay(pdMS_TO_TICKS(10));
+            uint8_t result = 0;
+            if (ReadRegs(kRegResetResult, &result, 1) && result == 0x80) {
+                reset_ok = true;
+                break;
+            }
+        }
+        if (!reset_ok) {
+            printf("Qmi8658: soft reset did not confirm (RSTResult != 0x80) — proceeding anyway\n");
+        }
+
         // Sequence and register values match QMI8658_init() /
         // QMI8658_config_acc() / QMI8658_config_gyro() in the vendor demo:
         // Ctrl1=0x60, Ctrl2 = accel +-8g @ 1000Hz, Ctrl5=0x00 (LPF/HPF off
         // — the vendor code computes LPF bits but then unconditionally
         // overwrites them with 0 before the write), Ctrl7 = enable
         // accel+gyro.
-        WriteReg(kRegCtrl1, 0x60);
+        //
+        // 0x60 -> 0x78 (2026-09-07, wom-wake-mode branch) — after the
+        // WOM_EDGE_TEST diagnostic (main.cpp) found zero GPIO edges on
+        // either INT pin across 5 rounds despite confirmed genuine WoM
+        // detection (STATUS1.WoM latching correctly, negative-control
+        // clean), a second AI model consulted on this found that the
+        // QMI8658A datasheet (sister part, same die family) documents
+        // CTRL1 bit3/bit4 as INT1_EN/INT2_EN — "0: pin is high-Z, 1: pin
+        // output enabled", default 0 — while our QMI8658C Rev A datasheet
+        // marks those same two bits "Reserved" (a document gap, not a
+        // different chip behavior, per that analysis — matches this
+        // project's own already-found Section 5.9/7.4 RESET-value
+        // contradiction, i.e. this specific datasheet copy is known
+        // unreliable in more than one place). 0x60 = 0110_0000 leaves both
+        // bits 0 — every INT pin left high-Z this whole time would fully
+        // explain "zero edges no matter what else changes" across every
+        // WoM test round without needing any of those other rounds' fixes
+        // to have been wrong. 0x78 = 0x60 | 0x18 sets both bits 3 and 4,
+        // enabling both INT1 and INT2 outputs; deliberately ORed rather
+        // than a fresh literal so bits 5/6 (whatever they are — not
+        // re-derived here, unrelated to this change) stay exactly as the
+        // vendor demo had them.
+        //
+        // Caveat this doesn't explain (told to me straight, not hidden):
+        // GPIO48 was observed carrying real ~900Hz DRDY-synced activity
+        // earlier this session while CTRL1 was still 0x60 — if INT2 were
+        // genuinely high-Z the whole time, that pulse shouldn't have
+        // reached the physical pin either. Possible the C-die routes DRDY
+        // through a different path than discrete WoM/tap events, but
+        // that's not confirmed either way — this is a cheap, high-signal
+        // test regardless of that open question, not a certainty.
+        //
+        // CONFIRMED (2026-09-07) — this was the actual bug. With this fix
+        // plus CAL1_H reverted to 0x40 below, WOM_EDGE_TEST captured 107
+        // edges on GPIO48 across 5 real taps (6 clearly separated bursts,
+        // each ~7-19 rapid toggles over ~10-20ms — one physical tap's
+        // accel spike apparently crosses the WoM threshold on several
+        // consecutive 1000Hz samples, each independently toggling the
+        // line, not one clean toggle per "event" the way Section 12.4's
+        // wording alone suggested), where every prior round captured
+        // zero. INT2 was simply never driving the pin before this.
+        WriteReg(kRegCtrl1, 0x78);
         WriteReg(kRegCtrl2, 0x23);  // +-8g range, 1000Hz ODR
         WriteReg(kRegCtrl5, 0x00);
         // CTRL3 gFS<2:0> is bits[6:4] (QMI8658C datasheet Rev 0.6, Table
@@ -220,6 +297,136 @@ public:
         WriteReg(kRegCtrl7, enable ? 0x21 : 0x03);  // accel-only+DRDY_DIS vs accel+gyro; CTRL2/tap CAL registers untouched
     }
 
+    // Wake-on-Motion mode (2026-09-06, M9 — wom-wake-mode branch) —
+    // datasheet Section 12. Tried first as the tap engine + light sleep's
+    // GPIO wakeup (sleep_mode.cpp), but a real tap's INT2 signal is a
+    // brief pulse "synced with DRDY" (Section 10.5, ~1ms at this ODR) —
+    // on hardware, ESP_SLEEP_WAKEUP_GPIO never once fired across several
+    // real taps, every wake fell through to the 1s timer backstop
+    // instead, consistent with the pulse being too short for the
+    // level-wakeup detector to catch reliably. WoM is different: Section
+    // 12.4 — "For each WoM event, the state of the selected interrupt
+    // line is toggled" — from the configured initial value (0 here), a
+    // real event drives INT2 to 1 and *holds* it there until the host
+    // reads STATUS1 (PollWomEvent() below), not a pulse. That's exactly
+    // the level-shaped signal GPIO wakeup needs.
+    //
+    // Trade-off accepted knowingly: WoM wakes on any sufficiently large
+    // accelerometer slope, not specifically a tap — being picked up, the
+    // desk being knocked, etc. all wake the device too. Matches this
+    // project's "anything that wakes the device comes back paused,
+    // requires a real second tap to resume" model (AppController design
+    // note 9) reasonably well — a spurious wake just means one extra
+    // paused screen, not a false start.
+    //
+    // EnterWakeOnMotion()/ExitWakeOnMotion() follow the datasheet's own
+    // two configuration sequences exactly (Section 12.5 enter, 12.6
+    // exit) rather than a single toggle, since the two procedures aren't
+    // quite symmetric (exit deliberately leaves CTRL7 disabled — see
+    // ExitWakeOnMotion()'s comment). threshold_mg/blanking_samples are
+    // starting points (like every other threshold in this file), not a
+    // finished tune — watch for both missed wakes (raise threshold too
+    // high) and false wakes from desk vibration (too low) on real
+    // hardware. CAL1_L/CAL1_H are the same scratch registers
+    // ConfigureTap() uses for its own settings, just carrying a different
+    // meaning depending on which CTRL9 command follows them — not
+    // documented whether the tap engine's own already-latched thresholds
+    // survive a WoM configuration cycle in between, so the caller is
+    // expected to just re-run ConfigureTap() after ExitWakeOnMotion()
+    // rather than assume they did.
+    void EnterWakeOnMotion(uint8_t threshold_mg, uint8_t blanking_samples)
+    {
+        if (!dev_) return;
+        WriteReg(kRegCtrl7, 0x00);  // disable all sensors — required before configuring WoM (datasheet 12.5)
+        // Explicit CTRL8=0x00 (2026-09-07) — not in the datasheet's own
+        // Figure 25 configuration sequence, added after WOM_EDGE_TEST
+        // (main.cpp) showed STATUS1.WoM genuinely latching only on real
+        // motion (confirmed via a no-touch negative control — see git
+        // history) while *neither* physical INT pin ever showed an edge.
+        // Section 6 says WoM mode's INT pin behavior "follows the
+        // configuration of WoM", implying it overrides whatever CTRL8
+        // (still 0x01 — tap engine "enabled" — left over from the last
+        // ConfigureTap() call, since this function never otherwise
+        // touches CTRL8) says. Testing whether that's actually true on
+        // this chip, or whether the tap engine still enabled in CTRL8
+        // is what's preventing WoM's own routing from reaching the pin.
+        WriteReg(kRegCtrl8, 0x00);
+        WriteReg(kRegCal1L, threshold_mg);
+        // bits[7:6] select interrupt pin + initial value (Table 39: "01"
+        // = INT2/init-0, "11" = INT2/init-1, "00" = INT1/init-0, "10" =
+        // INT1/init-1); bits[5:0] is the blanking time in accelerometer
+        // samples (max 63, ~63ms at this device's 1000Hz accel ODR) —
+        // screens out startup transients right after enabling, same
+        // spirit as the external discard loop main.cpp already needs for
+        // the tap engine's own CTRL7-toggle quirk (see
+        // SetLowPowerAccelOnly()'s comment), but built into the chip
+        // this time.
+        //
+        // 0x40 -> 0x80 -> back to 0x40 (2026-09-07): tried 0x80 (bit7 set
+        // instead of bit6) for one round after 0x40 produced zero edges,
+        // on the theory the 2-bit field might be read the other way
+        // round — that round also produced zero edges, but a second AI
+        // model consulted on the whole investigation cross-checked this
+        // specific field against both the QST reference driver's own enum
+        // (bit6 selects the pin, bit7 the initial value — matching 0x40's
+        // reading, not 0x80's) and lewisxhe/SensorLib's macros, and judged
+        // 0x40 was the correct encoding all along. Combined with the
+        // CTRL1 INT1_EN/INT2_EN finding just above (both INT pins were
+        // simply high-Z this whole time, in every round including this
+        // one), that fully accounts for round 5 also showing zero edges
+        // without the bit-order guess itself having been wrong. Reverted
+        // back to 0x40 accordingly, now testing CTRL1's fix in isolation
+        // against the encoding this project's own tap-engine-adjacent
+        // reasoning already had right the first time.
+        WriteReg(kRegCal1H, static_cast<uint8_t>(0x40 | (blanking_samples & 0x3F)));
+        // Checked now (2026-09-07) — round 1 of the WOM_EDGE_TEST
+        // diagnostic (main.cpp) captured zero edges on IMU_INT2 across 5
+        // real taps despite STATUS1.WoM latching by the end, which could
+        // mean this handshake silently failed rather than the interrupt
+        // just going to the wrong pin. Ruling that in or out directly.
+        if (!WriteCommandAndWait(kCmdWriteWomSetting)) {
+            printf("Qmi8658::EnterWakeOnMotion: CTRL9 handshake failed\n");
+        }
+        // Accel-only enable — WoM still needs the accelerometer running
+        // internally to evaluate motion (datasheet 12.3), even though "no
+        // sensor data is generated" in the normal DRDY sense while in
+        // this mode (Section 6). Same accel-only rationale as
+        // SetLowPowerAccelOnly(true), not repeated here.
+        WriteReg(kRegCtrl7, 0x01);
+    }
+
+    void ExitWakeOnMotion()
+    {
+        if (!dev_) return;
+        WriteReg(kRegCtrl7, 0x00);  // disable all sensors (datasheet 12.6)
+        WriteReg(kRegCal1L, 0x00);  // 0x00 disables WoM, returns INT pins to normal function (Table 39)
+        if (!WriteCommandAndWait(kCmdWriteWomSetting)) {
+            printf("Qmi8658::ExitWakeOnMotion: CTRL9 handshake failed\n");
+        }
+        // Deliberately leaves CTRL7 at 0x00 (sensors disabled) rather
+        // than restoring 6DOF here — the caller is expected to
+        // immediately call ConfigureTap() afterward (see this method's
+        // class-level comment), which starts with its own CTRL7=0x00 and
+        // ends by restoring CTRL7=0x03 anyway; toggling CTRL7 off then
+        // back on here just to have ConfigureTap() toggle it off again
+        // moments later would be pure waste.
+    }
+
+    // Polls for a Wake-on-Motion event. STATUS1.bit2 (WoM) — reading
+    // STATUS1 clears the bit and resets INT2 back to its configured
+    // initial value (datasheet 12.4), the same read-clears shape as
+    // PollTapEvent()'s STATUS1.bit1 below.
+    bool PollWomEvent()
+    {
+        if (!dev_) return false;
+        uint8_t status1 = 0;
+        if (!ReadRegs(kRegStatus1, &status1, 1)) return false;
+        if (status1 != 0) {
+            printf("Qmi8658::PollWomEvent: STATUS1=0x%02X\n", status1);
+        }
+        return (status1 & 0x04) != 0;
+    }
+
     // Polls for a new tap event. TAP_STATUS (0x59) holds the *type* of the
     // most recent tap, but its value doesn't change between two same-type
     // taps in a row, so diffing it directly misses repeats — that was this
@@ -279,9 +486,12 @@ private:
     static constexpr uint8_t kRegStatus1 = 0x2F;
     static constexpr uint8_t kRegTapStatus = 0x59;
     static constexpr uint8_t kRegAxL = 0x35;
+    static constexpr uint8_t kRegReset = 0x60;
+    static constexpr uint8_t kRegResetResult = 0x4D;
 
     static constexpr uint8_t kCmdAck = 0x00;
     static constexpr uint8_t kCmdConfigureTap = 0x0C;
+    static constexpr uint8_t kCmdWriteWomSetting = 0x08;
 
     static constexpr float kAccelLsbPerG = 4096.0f;   // +-8g range
     static constexpr float kGyroLsbPerDps = 128.0f;   // +-256dps range (32768/256)
@@ -303,6 +513,14 @@ private:
     {
         WriteReg(kRegCtrl9, cmd);
         if (!WaitForStatusIntBit(true)) return false;
+        // (2026-09-07: this used to print gpio_get_level(GPIO_NUM_47) here
+        // as a zero-risk check of CTRL1.bit3/INT1_EN, per datasheet 6.2's
+        // "host can check the INT1 pin high level for the handshake" — it
+        // read 1, confirming the enable-bit theory before the WOM_EDGE_TEST
+        // round that settled it for real (107 edges on GPIO48, correlated
+        // with 5 real taps). Removed now that its question is answered;
+        // see the constructor's CTRL1 comment and EnterWakeOnMotion()'s
+        // CAL1_H comment for the full writeup.)
         WriteReg(kRegCtrl9, kCmdAck);
         return WaitForStatusIntBit(false);
     }

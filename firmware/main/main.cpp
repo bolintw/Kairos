@@ -1,3 +1,5 @@
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
 
 #include "driver/gpio.h"
@@ -104,6 +106,45 @@ constexpr float kTapGamma = 0.25f;
 constexpr float kTapPeakMagThr = 0.8f;
 constexpr float kTapUdmThr = 0.4f;
 
+// Wake-on-Motion config for M9 idle sleep (2026-09-06, wom-wake-mode
+// branch — see qmi8658.hpp's EnterWakeOnMotion() for the full rationale
+// vs. the tap-engine-based approach this replaces).
+//   - kWomThresholdMg: 1mg/LSB per this datasheet — not independently
+//     re-derived, but at least not contradicted by lewisxhe/SensorLib's
+//     own configWakeOnMotion(), which writes this same raw byte straight
+//     through with no unit conversion, default WoMThreshold=200 — so 200
+//     is that library's own idea of a normal, general-purpose setting,
+//     not a conservative floor. 8-bit register, max 255 either way: the
+//     hardware's whole available range, not an arbitrary cap — not much
+//     headroom left regardless of where it's set within it. 125mg
+//     (2026-09-06 starting guess) confirmed working end-to-end on
+//     hardware 2026-09-07 (real ESP_SLEEP_WAKEUP_GPIO wake, cause=7), but
+//     way oversensitive — an incidental hand bump woke it. 220mg, one
+//     step later, same result. Now at the register's actual ceiling
+//     (255mg) as the last data point this axis alone can give — being
+//     this close to SensorLib's own "normal" default the whole time
+//     suggests the chip's WoM is just inherently this sensitive by
+//     design (matches EnterWakeOnMotion()'s own already-documented
+//     trade-off: wakes on any sufficiently large accelerometer slope, not
+//     specifically a deliberate tap). If 255 is still oversensitive, the
+//     threshold register itself is maxed out and any further filtering
+//     has to happen in software (e.g. requiring the WoM flag to still be
+//     set across more than one RunIdleSleep() backstop-timer cycle before
+//     actually waking the UI, rather than trusting the very first
+//     ESP_SLEEP_WAKEUP_GPIO) — not implemented yet, next step if this
+//     doesn't land.
+//   - kWomBlankingSamples: 6-bit field, max 63 (~63ms at the 1000Hz accel
+//     ODR CTRL2 is already configured for). Set to the max as a
+//     conservative starting point, on the theory that entering WoM mode
+//     toggles CTRL7 the same way entering accel-only mode did, and that
+//     toggle reliably produced a spurious STATUS1 latch there (see
+//     qmi8658.hpp's SetLowPowerAccelOnly() history) — not yet confirmed
+//     WoM's own built-in blanking window is enough to absorb an
+//     analogous transient on its own; the discard loop below is a second
+//     layer of defense either way.
+constexpr uint8_t kWomThresholdMg = 255;
+constexpr uint8_t kWomBlankingSamples = 63;
+
 static LGFX lcd;
 // Two buffers now (2026-09-06, was one) — see lvgl_flush_cb()'s
 // pushImageDMA()/waitDMA() comment for why.
@@ -196,6 +237,104 @@ AttitudeEstimator::Sample ToAttitudeSample(const Qmi8658::Sample& s)
     out.gyro_dps[1] = s.gyro_dps[1];
     out.gyro_dps[2] = s.gyro_dps[2];
     return out;
+}
+
+// Temporary diagnostic (2026-09-07, wom-wake-mode branch) — round 1
+// watched only IMU_INT2/GPIO48 (the pin CAL1_H's interrupt-select field
+// was written to choose, per Table 39: bits[7:6]="01" -> "INT2 with
+// initial value 0") and captured *zero* edges across 5 real taps, even
+// though STATUS1.WoM did latch to 1 by the end (read via the
+// post-test PollTapEvent() discard call) — so the chip genuinely
+// detected motion, but nothing toggled on GPIO48 at all. That rules out
+// the original toggle-parity theory (which predicted *some* edges,
+// landing on either level) and points somewhere else — the two live
+// candidates now: (a) the CAL1_H bit encoding is backwards from what's
+// intended here and the interrupt actually went to IMU_INT1/GPIO47
+// instead, or (b) the CTRL9 WRITE_WOM_SETTING handshake silently didn't
+// take (WriteCommandAndWait()'s return value was never checked). Round 2
+// watches *both* IMU_INT1 (GPIO47) and IMU_INT2 (GPIO48) simultaneously
+// to settle (a) directly, and qmi8658.hpp's EnterWakeOnMotion() now
+// prints if the CTRL9 handshake reports failure, to check (b) too.
+//
+// Otherwise unchanged from round 1: switches the IMU into WoM mode for
+// kWomEdgeTestDurationMs, watches both pins with plain edge-triggered
+// ISRs (GPIO_INTR_ANYEDGE) logging each transition's pin/level/timestamp
+// to a fixed-size buffer, then dumps it and restores the tap engine.
+// Still deliberately not touching gpio_wakeup_enable()/
+// esp_sleep_enable_gpio_wakeup() or reading STATUS1 mid-window — see
+// round 1's reasoning above, unchanged.
+//
+// RESOLVED (2026-09-07) — round 2's actual root cause turned out to be
+// neither (a) nor (b) above: CTRL1.bit3/bit4 (INT1_EN/INT2_EN, see
+// qmi8658.hpp's constructor comment) were never set, so both INT pins
+// were high-Z the whole time regardless of anything WoM-config-related.
+// With that fixed (plus CAL1_H reverted to its original 0x40 — round 5's
+// 0x80 guess turned out to have not been the issue either), this same
+// test captured 107 real edges on GPIO48 across 5 taps. Test kept in the
+// codebase (still useful if WoM ever needs re-diagnosing) but switched
+// off by default now that the mystery it was built for is solved — see
+// RunIdleSleep()'s actual sleep/wake path below for the real feature.
+constexpr bool kRunWomEdgeTestOnBoot = false;
+constexpr gpio_num_t kWomEdgeTestInt1Gpio = GPIO_NUM_47;
+constexpr gpio_num_t kWomEdgeTestInt2Gpio = GPIO_NUM_48;
+constexpr uint32_t kWomEdgeTestDurationMs = 15000;
+constexpr size_t kWomEdgeTestMaxEvents = 256;
+
+struct WomEdgeEvent {
+    int64_t t_us;
+    gpio_num_t gpio;
+    int level;
+};
+WomEdgeEvent g_wom_edge_events[kWomEdgeTestMaxEvents];
+std::atomic<size_t> g_wom_edge_write_idx{0};
+
+void IRAM_ATTR WomEdgeIsr(void* arg)
+{
+    const gpio_num_t gpio = static_cast<gpio_num_t>(reinterpret_cast<intptr_t>(arg));
+    const size_t idx = g_wom_edge_write_idx.fetch_add(1, std::memory_order_relaxed);
+    if (idx < kWomEdgeTestMaxEvents) {
+        g_wom_edge_events[idx].t_us = esp_timer_get_time();
+        g_wom_edge_events[idx].gpio = gpio;
+        g_wom_edge_events[idx].level = gpio_get_level(gpio);
+    }
+}
+
+void RunWomEdgeTest(Qmi8658& imu)
+{
+    for (gpio_num_t gpio : {kWomEdgeTestInt1Gpio, kWomEdgeTestInt2Gpio}) {
+        gpio_config_t cfg = {};
+        cfg.pin_bit_mask = 1ULL << gpio;
+        cfg.mode = GPIO_MODE_INPUT;
+        cfg.intr_type = GPIO_INTR_ANYEDGE;
+        gpio_config(&cfg);
+    }
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(kWomEdgeTestInt1Gpio, WomEdgeIsr, reinterpret_cast<void*>(kWomEdgeTestInt1Gpio));
+    gpio_isr_handler_add(kWomEdgeTestInt2Gpio, WomEdgeIsr, reinterpret_cast<void*>(kWomEdgeTestInt2Gpio));
+
+    imu.EnterWakeOnMotion(kWomThresholdMg, kWomBlankingSamples);
+    printf("WOM_EDGE_TEST: started, %lus window, tap/move the device now — not entering sleep, watching both INT1(47) and INT2(48)\n",
+           static_cast<unsigned long>(kWomEdgeTestDurationMs / 1000));
+
+    // Deliberately just waits — no I2C traffic to this device for the
+    // whole window, see the class comment for why.
+    vTaskDelay(pdMS_TO_TICKS(kWomEdgeTestDurationMs));
+
+    gpio_isr_handler_remove(kWomEdgeTestInt1Gpio);
+    gpio_isr_handler_remove(kWomEdgeTestInt2Gpio);
+    imu.ExitWakeOnMotion();
+    imu.ConfigureTap(kTapPriority, kTapPeakWindow, kTapTapWindow, kTapDTapWindow, kTapAlpha, kTapGamma,
+                      kTapPeakMagThr, kTapUdmThr);
+    (void)imu.PollTapEvent();  // discard the same CTRL7/CTRL8-toggle spurious latch ConfigureTap() always produces
+
+    size_t count = g_wom_edge_write_idx.load(std::memory_order_relaxed);
+    const bool overflowed = count > kWomEdgeTestMaxEvents;
+    if (overflowed) count = kWomEdgeTestMaxEvents;
+    printf("WOM_EDGE_TEST: done, %zu edge(s) captured%s\n", count, overflowed ? " (buffer overflowed, some dropped)" : "");
+    for (size_t i = 0; i < count; ++i) {
+        printf("WOM_EDGE,i=%zu,t_us=%lld,gpio=%d,level=%d\n", i, static_cast<long long>(g_wom_edge_events[i].t_us),
+               static_cast<int>(g_wom_edge_events[i].gpio), g_wom_edge_events[i].level);
+    }
 }
 
 }  // namespace
@@ -337,6 +476,10 @@ extern "C" void app_main(void)
     // spurious STATUS1 tap flag (observed as "Taps 1" right at boot, with
     // no physical tap). Discard it here so the count starts clean.
     (void)imu.PollTapEvent();
+
+    if (kRunWomEdgeTestOnBoot) {
+        RunWomEdgeTest(imu);  // blocks ~15s — see its own comment
+    }
 
     static AttitudeEstimator attitude_estimator(calibration.face_a_offset_deg, calibration.accel_bias_g[0],
                                                  calibration.accel_bias_g[1]);
@@ -510,41 +653,42 @@ extern "C" void app_main(void)
                     // right after.
                     esp_timer_stop(tick_timer);
 
-                    // Drop the IMU to accel-only for the duration of the
-                    // nap loop — cuts its own current draw from ~1mA
-                    // (normal 6DOF) to roughly 182uA, see
-                    // qmi8658.hpp's SetLowPowerAccelOnly() comment. Accel
-                    // ODR/tap config is deliberately left untouched by
-                    // that call, so nothing needs reconfiguring here
-                    // around it.
-                    imu.SetLowPowerAccelOnly(true);
-                    // Toggling CTRL7 reliably produces one spurious tap —
-                    // caught on hardware with diagnostic logging (raw
-                    // STATUS1/TAP_STATUS prints in PollTapEvent()): a
-                    // clean, well-formed Single-Tap event (TAP_STATUS low
-                    // 2 bits = 01, no other STATUS1 bits set) appeared
-                    // every single time, always right after a 200ms
-                    // discard window had already elapsed, never during
-                    // it. That timing matches the tap engine's own
-                    // confirmation latency, not a register-read race:
-                    // peak_window (40 samples) + tap_window (100 samples)
-                    // = 140 samples, ~156ms at this device's real ~896.8Hz
-                    // accel ODR (see qmi8658.hpp's SetLowPowerAccelOnly()
-                    // comment on why it's 896.8Hz, not 1000Hz) — the
-                    // minimum time the tap engine needs from detecting a
-                    // peak to confirming/reporting it as a tap. 200ms sat
-                    // right at that threshold; likely the CTRL7 toggle
-                    // itself causes one genuine transient in the analog
-                    // front-end that the tap engine picks up as a peak,
-                    // takes its normal ~156ms to confirm, every time.
-                    // Widened the discard window well past that instead
-                    // of the threshold itself.
+                    // Wake-on-Motion for the duration of the nap loop
+                    // (2026-09-06, wom-wake-mode branch) — replaces the
+                    // tap-engine + SetLowPowerAccelOnly() approach after
+                    // that never once caught a real tap via GPIO wakeup on
+                    // hardware (the tap pulse is too brief for light
+                    // sleep's level-wakeup detector — see qmi8658.hpp's
+                    // EnterWakeOnMotion() comment). Same accel-only power
+                    // draw as before, different wake signal.
+                    imu.EnterWakeOnMotion(kWomThresholdMg, kWomBlankingSamples);
+                    // Discard window for the same class of spurious
+                    // STATUS1 latch the old SetLowPowerAccelOnly(true)
+                    // needed one for (CTRL7 toggle -> one transient the
+                    // motion-detection front-end reads as real) — see
+                    // kWomBlankingSamples' comment above for why this is
+                    // still here even though WoM has its own built-in
+                    // blanking window.
                     for (int i = 0; i < 30; ++i) {
-                        (void)imu.PollTapEvent();
+                        (void)imu.PollWomEvent();
                         vTaskDelay(pdMS_TO_TICKS(20));
                     }
                     RunIdleSleep(imu);
-                    imu.SetLowPowerAccelOnly(false);
+                    imu.ExitWakeOnMotion();
+                    // ExitWakeOnMotion() deliberately leaves CTRL7
+                    // disabled (see its own comment) — ConfigureTap()
+                    // both restores normal 6DOF operation (its own final
+                    // CTRL7=0x03 write) and re-establishes the tap
+                    // engine's thresholds, which aren't guaranteed to
+                    // have survived a WoM configuration cycle reusing the
+                    // same CAL1-4 scratch registers.
+                    imu.ConfigureTap(kTapPriority, kTapPeakWindow, kTapTapWindow, kTapDTapWindow,
+                                      kTapAlpha, kTapGamma, kTapPeakMagThr, kTapUdmThr);
+                    // Same spurious-latch quirk as the boot-time
+                    // ConfigureTap() call — discard it here too so the
+                    // next real PollTapEvent() isn't immediately misread
+                    // as a tap that just happened.
+                    (void)imu.PollTapEvent();
                     // Gyro Turn On Time is 150ms + 3/ODR per the
                     // QMI8658C datasheet (Tables 7/8) — the gyroscope's
                     // MEMS resonator needs real physical spin-up time

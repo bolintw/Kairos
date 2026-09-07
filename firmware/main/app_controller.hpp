@@ -216,33 +216,40 @@
 //
 // 9. Idle sleep (2026-09-06, M9): the ~18s paused/idle sequence described
 //    in design note 5 ends with ShouldEnterIdleSleep() going true, at
-//    which point main.cpp switches the IMU into a lower-power accel-only
-//    mode (Qmi8658::SetLowPowerAccelOnly(true) — gyro's own current draw
-//    barely depends on ODR, so disabling it outright was the only real
-//    lever, see that method's comment) and calls the blocking
-//    RunIdleSleep(imu) (sleep_mode.hpp) — repeated short naps, polling
-//    for a tap between each one — followed by restoring normal 6DOF mode
-//    and NotifyWokeFromIdleSleep() once it returns. Deliberately NOT deep
+//    which point main.cpp switches the IMU into Wake-on-Motion mode
+//    (Qmi8658::EnterWakeOnMotion() — see its comment for why WoM, not the
+//    tap engine: a real tap's INT2 signal is a brief pulse, too short for
+//    light sleep's GPIO wakeup to reliably catch on real hardware, where
+//    WoM's held-level signal isn't) and calls the blocking
+//    RunIdleSleep(imu) (sleep_mode.hpp) — repeated real light sleeps,
+//    each one either woken directly by a motion event on IMU_INT2 or a
+//    ~1s backstop timer — followed by restoring the tap engine and
+//    NotifyWokeFromIdleSleep() once it returns. Deliberately NOT deep
 //    sleep: light sleep resumes execution right where RunIdleSleep() left
 //    off rather than rebooting, so current_'s face/phase/remaining time
 //    and AttitudeEstimator's angle are simply still there when we come
 //    back — no state to save or restore. See
 //    gravity_timer_project_plan.md's M9 notes for the fuller comparison
-//    against deep sleep + Wake-on-Motion (blocked: IMU_INT1/INT2 aren't
-//    wired to an RTC-capable GPIO, and the board's header doesn't expose
-//    them for a bodge wire either) and deep sleep + ULP-RISC-V bit-bang
-//    I2C (works, but far more implementation/debugging cost for savings
-//    that are hard to feel against this path's already-huge improvement).
+//    against *deep* sleep + Wake-on-Motion (blocked there specifically:
+//    IMU_INT1/INT2 aren't wired to an RTC-capable GPIO, which deep
+//    sleep's ext0/ext1 wakeup requires but light sleep's GPIO wakeup
+//    doesn't — that's what makes WoM usable here at all) and deep sleep +
+//    ULP-RISC-V bit-bang I2C (works, but far more implementation/
+//    debugging cost for savings that are hard to feel against this
+//    path's already-huge improvement).
 //
-//    Tap-only wake (2026-09-06, was tap-or-rotation until the accel-only
-//    power mode above removed gyro from the picture entirely while
-//    asleep). Whatever tap caused RunIdleSleep() to return is consumed by
-//    that function itself — it's never forwarded to OnTap() — so the
-//    device always comes back paused, never straight into running.
-//    Reaching in and toggling running_ requires a distinct, subsequent
-//    tap once back in the normal loop. Deliberate: resuming a timer just
-//    because the device woke up would mean an incidental bump could
-//    silently start a session.
+//    Motion-only wake (2026-09-06, was tap-only, was tap-or-rotation
+//    before that): trade-off accepted knowingly — WoM wakes on any
+//    sufficiently large accelerometer slope, not specifically a tap
+//    (being picked up, the desk being knocked, etc. all wake it too).
+//    Whatever event caused RunIdleSleep() to return is consumed by that
+//    function itself — it's never forwarded to OnTap() — so the device
+//    always comes back paused, never straight into running. Reaching in
+//    and toggling running_ requires a distinct, subsequent tap once back
+//    in the normal loop. Deliberate: resuming a timer just because the
+//    device woke up would mean an incidental bump could silently start a
+//    session — and matters more now than it did for tap-only wake, since
+//    a wider set of events can trigger this wake at all.
 //
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
