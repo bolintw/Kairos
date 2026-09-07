@@ -119,10 +119,19 @@
 //        same day to keep the notification channel to brightness alone
 //        for now — GuiManager::SetWarmth() still exists if it comes back
 //      - interacting while paused: snap to full bright and restart the
-//        long idle timeout below
-//      - paused with no interaction for a much longer (minutes-scale)
-//        idle timeout: dim to fully off, independent of the ~10s timeout
-//        above
+//        idle-sleep countdown below
+//      - paused with no interaction for kIdlePreDimHoldMs (2026-09-06,
+//        replaces an earlier minutes-scale "dim to off" timeout that
+//        never got past a first draft): fast-fade to fully off over
+//        kIdleFadeToOffMs, then hold off for kIdleOffHoldMs more —
+//        ShouldEnterIdleSleep() becomes true once that whole sequence
+//        (kIdlePreDimHoldMs+kIdleFadeToOffMs+kIdleOffHoldMs, ~18s) has
+//        elapsed. main.cpp's loop checks this every tick and, once true,
+//        calls the blocking RunIdleSleep() (sleep_mode.hpp) and then
+//        NotifyWokeFromIdleSleep() once it returns. Reuses
+//        paused_elapsed_ms_ directly rather than a separate timer field —
+//        it already tracks exactly "ms continuously paused, reset on any
+//        interaction", which is exactly what this needs too.
 //    TimerFace never sees any of this — GetStatus() is facts only;
 //    AttitudeEstimator likewise has no notion of brightness.
 //
@@ -205,6 +214,36 @@
 //    versa), which is what let each one get simplified/fixed
 //    independently without touching the other.
 //
+// 9. Idle sleep (2026-09-06, M9): the ~18s paused/idle sequence described
+//    in design note 5 ends with ShouldEnterIdleSleep() going true, at
+//    which point main.cpp switches the IMU into a lower-power accel-only
+//    mode (Qmi8658::SetLowPowerAccelOnly(true) — gyro's own current draw
+//    barely depends on ODR, so disabling it outright was the only real
+//    lever, see that method's comment) and calls the blocking
+//    RunIdleSleep(imu) (sleep_mode.hpp) — repeated short naps, polling
+//    for a tap between each one — followed by restoring normal 6DOF mode
+//    and NotifyWokeFromIdleSleep() once it returns. Deliberately NOT deep
+//    sleep: light sleep resumes execution right where RunIdleSleep() left
+//    off rather than rebooting, so current_'s face/phase/remaining time
+//    and AttitudeEstimator's angle are simply still there when we come
+//    back — no state to save or restore. See
+//    gravity_timer_project_plan.md's M9 notes for the fuller comparison
+//    against deep sleep + Wake-on-Motion (blocked: IMU_INT1/INT2 aren't
+//    wired to an RTC-capable GPIO, and the board's header doesn't expose
+//    them for a bodge wire either) and deep sleep + ULP-RISC-V bit-bang
+//    I2C (works, but far more implementation/debugging cost for savings
+//    that are hard to feel against this path's already-huge improvement).
+//
+//    Tap-only wake (2026-09-06, was tap-or-rotation until the accel-only
+//    power mode above removed gyro from the picture entirely while
+//    asleep). Whatever tap caused RunIdleSleep() to return is consumed by
+//    that function itself — it's never forwarded to OnTap() — so the
+//    device always comes back paused, never straight into running.
+//    Reaching in and toggling running_ requires a distinct, subsequent
+//    tap once back in the normal loop. Deliberate: resuming a timer just
+//    because the device woke up would mean an incidental bump could
+//    silently start a session.
+//
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
 // double-integrating the gyro angle) and passes the resulting Output in.
@@ -221,6 +260,19 @@ public:
     // Call when the tap engine reports a new tap. Ignored for a short
     // window right after a face switch — see design note 6.
     void OnTap();
+
+    // True once the paused/idle timeout has faded the screen fully off
+    // and held it there — main.cpp's loop checks this every tick and, if
+    // true, calls the blocking RunIdleSleep() and then
+    // NotifyWokeFromIdleSleep() once it returns. See design note 9.
+    bool ShouldEnterIdleSleep() const;
+
+    // Call once after RunIdleSleep() returns: resets the idle countdown
+    // and snaps brightness back up immediately, same as any other
+    // interaction-while-paused event (design note 5) — without this the
+    // screen would stay black until the next tick's fade math happened
+    // to catch up.
+    void NotifyWokeFromIdleSleep();
 
 private:
     Face QuantizeFace(float screen_angle_deg) const;  // stateful — reads current_face_, see design note 1 above

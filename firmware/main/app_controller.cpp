@@ -37,18 +37,43 @@ constexpr uint32_t kFadeToDimMs = 10 * 1000;      // ~10s fade after becoming br
 // user's redesign) that never shipped past a first draft.
 constexpr uint32_t kFocusEndRampWindowMs = 30 * 1000;
 constexpr uint32_t kFocusEndRampMs = 3 * 1000;
-constexpr uint32_t kLongIdleTimeoutMs = 5 * 60 * 1000;  // minutes-scale, paused-only, backlight off
+
+// Idle-sleep sequence (2026-09-06, M9) — see app_controller.hpp design
+// note 9. Replaces an earlier flat 5-minute "dim to off while paused"
+// timeout: once ShouldEnterIdleSleep() exists to actually put the device
+// into light sleep, there's no reason to wait minutes first — these are
+// all just seconds. kIdlePreDimHoldMs is the same idea as kFadeToDimMs
+// above but for "paused and ignored", not "running": grace period before
+// assuming the user's actually done with the device, not just paused
+// mid-thought. kIdleFadeToDimMs fades to kDimmedBrightness (not all the
+// way to 0) and is intentionally quicker than kFadeToDimMs's leisurely
+// immersion-fade — this is a "winding down" cue, not that. kIdleDimHoldMs
+// holds at kDimmedBrightness, still normal operation (fast tap-poll rate,
+// not yet the coarser light-sleep nap cadence) in case the device is
+// still being handled. Only once all of that has elapsed does brightness
+// finally snap the rest of the way to 0 and ShouldEnterIdleSleep() go
+// true in the same tick — see the fade math below. All of these are
+// starting points, not yet validated against real use like
+// kFadeToDimMs/kDimmedBrightness were.
+constexpr uint32_t kIdlePreDimHoldMs = 10 * 1000;
+constexpr uint32_t kIdleFadeToDimMs = 3 * 1000;
+constexpr uint32_t kIdleDimHoldMs = 5 * 1000;
+constexpr uint32_t kIdleSleepThresholdMs = kIdlePreDimHoldMs + kIdleFadeToDimMs + kIdleDimHoldMs;  // ~18s total
 
 // See app_controller.hpp design note 6 — window after a face switch
 // during which a tap is ignored, absorbing flip-induced tap-engine
 // false triggers instead of letting them immediately start the timer.
-// 400 -> 1000 -> 500 (2026-08-25): the 1000ms version was tuned before
-// realizing the countdown started at commit (often mid-swing, still
-// moving), wasting most of the window before settling. Now that it only
-// counts down once !attitude.is_moving (Update()), the full window
-// consistently applies from the moment it's needed, so 500 is back to a
-// shorter, less sluggish-feeling value.
-constexpr uint32_t kTapMuteAfterSwitchMs = 500;
+// 400 -> 1000 -> 500 -> 800 (2026-09-06): the 1000ms version was tuned
+// before realizing the countdown started at commit (often mid-swing,
+// still moving), wasting most of the window before settling. Once it only
+// counted down once !attitude.is_moving (Update()), the full window
+// consistently applied from the moment it's needed, so 500 felt like
+// enough on the open bench. In the assembled enclosure, a flip still
+// often left enough residual wobble/knock after !is_moving first went
+// true (case rattling, hand releasing contact) to trip the tap engine and
+// start the timer right on arrival — 500ms of settled time wasn't quite
+// covering that. Widened to 800.
+constexpr uint32_t kTapMuteAfterSwitchMs = 800;
 
 // See app_controller.hpp design note 7 — outer ring breathe window, in
 // whole seconds not ms: the primary label displays remaining_ms/1000
@@ -257,8 +282,21 @@ void AppController::UpdateBrightness(uint32_t dt_ms, bool is_moving)
         // begins next tick, not this one.
     } else {
         paused_elapsed_ms_ += dt_ms;
-        if (paused_elapsed_ms_ >= kLongIdleTimeoutMs) {
+        if (paused_elapsed_ms_ >= kIdleSleepThresholdMs) {
+            // Full ~18s sequence has played out and we're handing off to
+            // RunIdleSleep() this same tick (main.cpp checks
+            // ShouldEnterIdleSleep() right after this call returns) — cut
+            // the rest of the way to fully off.
             brightness_ = 0.0f;
+        } else if (paused_elapsed_ms_ >= kIdlePreDimHoldMs) {
+            // Same shape as the running-branch fade above (linear t,
+            // clamped at 1), just faster and heading to kDimmedBrightness
+            // over kIdleFadeToDimMs, then held there (t stays clamped at 1)
+            // through kIdleDimHoldMs until the branch above takes over.
+            const uint32_t fade_elapsed_ms = paused_elapsed_ms_ - kIdlePreDimHoldMs;
+            const float t = static_cast<float>(fade_elapsed_ms) / static_cast<float>(kIdleFadeToDimMs);
+            const float clamped_t = t < 1.0f ? t : 1.0f;
+            brightness_ = 1.0f + clamped_t * (kDimmedBrightness - 1.0f);
         }
     }
 
@@ -267,6 +305,18 @@ void AppController::UpdateBrightness(uint32_t dt_ms, bool is_moving)
     prev_is_running_ = status.is_running;
     prev_has_target_ = status.has_target;
     prev_remaining_ms_ = status.remaining_ms;
+}
+
+bool AppController::ShouldEnterIdleSleep() const
+{
+    return paused_elapsed_ms_ >= kIdleSleepThresholdMs;
+}
+
+void AppController::NotifyWokeFromIdleSleep()
+{
+    paused_elapsed_ms_ = 0;
+    brightness_ = 1.0f;
+    gui_manager_.SetBrightness(brightness_);
 }
 
 void AppController::UpdateRing()

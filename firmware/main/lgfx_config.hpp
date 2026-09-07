@@ -23,7 +23,13 @@ public:
             auto cfg = _bus_instance.config();
             cfg.spi_host = SPI2_HOST;
             cfg.spi_mode = 0;
-            cfg.freq_write = 40000000;
+            // 40 -> 80MHz (2026-09-06) — hardware_pinout.md already notes
+            // this panel supports 80MHz (theoretical full-screen flush
+            // ~11.5ms), never tried until the main-loop timing
+            // investigation showed SPI transfer (flush_us) as ~35% of
+            // lv_timer_handler()'s cost. Short traces, no signal-integrity
+            // testing done — watch for garbled pixels after flashing.
+            cfg.freq_write = 80000000;
             cfg.freq_read = 16000000;
             cfg.spi_3wire = false;
             cfg.use_lock = true;

@@ -70,6 +70,29 @@ public:
                                   // display. This class only reports the
                                   // fact; the sleep *decision* stays in
                                   // AppController, same as Face.
+
+        // Diagnostic-only fields (2026-09-06), not used by AppController —
+        // added to actually see, rather than guess, what's happening
+        // during the post-flip "reverses slightly then creeps back to the
+        // right angle" feel reported on hardware. screen_angle_deg above
+        // is already the blend of these two; having them split out lets a
+        // serial log (see main.cpp's kAttitudeDebugLogEnabled) show
+        // whether the reversal comes from the accel-derived angle itself
+        // overshooting/lagging as gz drops, from the blend weight ramping
+        // up too abruptly, or something else not yet hypothesized.
+        float debug_gyro_only_angle_deg;   // angle_from_gyro this tick: pure
+                                            // integration, no accel
+                                            // correction applied
+        float debug_accel_only_angle_deg;  // this tick's accel-derived angle
+                                            // (AngleFromAccel on the
+                                            // low-passed accel reading),
+                                            // computed even when
+                                            // !in_valid_plane — untrustworthy
+                                            // there, but still worth seeing
+        float debug_gz_dps;                // bias-corrected, low-passed
+                                            // gyro Z used above — the
+                                            // in-plane rotation speed that
+                                            // drives AccelTrustWeight
     };
 
     // Sign convention, confirmed on hardware with the debug overlay's
@@ -150,10 +173,12 @@ private:
     // real jitter was measured on hardware). Standard EMA:
     // x = new_x*alpha + x*(1-alpha), seeded from the first real sample
     // (has_filtered_sample_) rather than 0 so there's no startup
-    // transient. Accel and gyro use separate alphas (kAccelLowPassAlpha/
-    // kGyroLowPassAlpha, split 2026-08-31 — see their comment) despite
-    // sharing this same field-level design; both are also separate from
-    // kComplementaryAlpha — these smooth the raw inputs, that blends
+    // transient. Accel and gyro use separate real-time constants
+    // (kAccelLowPassTauMs/kGyroLowPassTauMs, split 2026-08-31 — see their
+    // comment; converted from fixed per-tick alphas to dt-scaled ones
+    // 2026-09-06, see kGyroLowPassTauMs's comment) despite sharing this
+    // same field-level design; both are also separate from
+    // kComplementaryTauMs — these smooth the raw inputs, that blends
     // gyro-integration against accel for the output angle; don't confuse
     // the two kinds.
     float filtered_accel_g_[3] = {0.0f, 0.0f, 0.0f};

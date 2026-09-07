@@ -29,7 +29,9 @@ constexpr float kAzInvalidThresholdG = 0.3f;
 // stationary accel reading it's blending toward is much steadier than
 // when this was last tuned — safe to trust it more once genuinely still,
 // which shortens the final settle-in after a flip. Confirmed on hardware.
-constexpr float kComplementaryAlpha = 0.8f;  // weight on gyro-integrated angle, at rest (see AccelTrustWeight)
+//
+// Converted from a flat alpha to kComplementaryTauMs below (2026-09-06) —
+// see that constant's comment for why.
 
 // Adaptive complementary filter (2026-09-01): (1 - kComplementaryAlpha)
 // above is no longer applied as a flat per-tick accel weight — it's now
@@ -89,13 +91,49 @@ constexpr float kGyroSpeedZeroTrustDps = 60.0f;  // at/above this, accel
 // this is deliberately near the low-filtering end of what's been tried,
 // since gyro drives essentially all of the felt rotation responsiveness
 // (see kComplementaryAlpha's 90/10 split above).
-constexpr float kGyroLowPassAlpha = 0.75f;
+//
+// Time-based, not a flat per-tick alpha (2026-09-06): all three of
+// kGyroLowPassAlpha/kAccelLowPassAlpha/kComplementaryAlpha above were
+// fixed fractions applied once per Update() *call*, not per unit time —
+// fine as long as the caller ticks at a roughly constant rate close to
+// what they were tuned at (~8.33ms/120Hz), which a main-loop timing
+// investigation (see gravity_timer_project_plan.md's M9 section) found is
+// NOT reliably true on real hardware — the sensor loop measured ~13-15Hz
+// there, not 120Hz. At 1/10th the tuned tick rate, a flat per-call alpha
+// makes the *real-time* smoothing/blending 10x slower than it was tuned
+// to feel like, which is a real suspect behind the "reversal, then slow
+// creep back" feel investigated around the same time — not proven to be
+// the whole story, but decoupling filter behavior from tick rate is
+// correct regardless of how that turns out, and doesn't require the loop
+// speed problem to be fixed first to pay off.
+//
+// tau (ms) is the actual time-invariant quantity a first-order low-pass
+// is tuned by; alpha at a given dt is derived from it via ExpAlpha()
+// below (alpha = 1 - exp(-dt/tau)), not looked up as a fixed constant.
+// The tau values here are exactly what the *old* alphas already implied
+// at the 120Hz rate they were tuned at (tau = -dt_ref/ln(1-alpha),
+// dt_ref=1000/120ms) — confirmed against this file's own pre-existing
+// "~6ms"/"~37ms" comments above rather than computed fresh, so switching
+// to this scheme reproduces the exact same feel at 120Hz and only changes
+// behavior when the real tick rate drifts from that.
+constexpr float kGyroLowPassTauMs = 6.0f;
 // kAccelLowPassAlpha: 0.6 -> 0.2 (2026-08-31, back to the value that
 // felt too laggy in the old *shared* scheme — not laggy here, since
 // accel was never the fast-response signal to begin with). ~37ms tau:
 // heavier smoothing specifically to reject the vibration/shock content
 // blamed above, at essentially no cost to rotation feel.
-constexpr float kAccelLowPassAlpha = 0.2f;
+constexpr float kAccelLowPassTauMs = 37.35f;
+// Same underlying number as kAccelLowPassTauMs (both alphas were 0.2 at
+// the 120Hz tuning point — see kComplementaryAlpha's own history above),
+// kept as a separate named constant since it governs a conceptually
+// different thing (the complementary blend's at-rest weight, not a raw-
+// sample smoothing filter) and could end up tuned independently later.
+constexpr float kComplementaryTauMs = 37.35f;
+
+float ExpAlpha(float dt_ms, float tau_ms)
+{
+    return 1.0f - std::exp(-dt_ms / tau_ms);
+}
 
 float LowPass(float new_x, float old_x, float alpha)
 {
@@ -132,13 +170,17 @@ float GyroMagnitudeDps(float gx, float gy, float gz)
 // which mixes in off-axis GX/GY meant for a different question — "is the
 // device being picked up" — this is about how fast the tracked angle
 // itself is currently changing).
-float AccelTrustWeight(float gz_abs_dps)
+// dt_ms added (2026-09-06) — see kGyroLowPassTauMs's comment. The old
+// "(1.0f - kComplementaryAlpha)" full-trust ceiling is now
+// ExpAlpha(dt_ms, kComplementaryTauMs), the time-correct version of the
+// same number.
+float AccelTrustWeight(float gz_abs_dps, float dt_ms)
 {
     float trust = 1.0f - (gz_abs_dps - kGyroSpeedFullTrustDps) /
                               (kGyroSpeedZeroTrustDps - kGyroSpeedFullTrustDps);
     if (trust < 0.0f) trust = 0.0f;
     if (trust > 1.0f) trust = 1.0f;
-    return (1.0f - kComplementaryAlpha) * trust;
+    return ExpAlpha(dt_ms, kComplementaryTauMs) * trust;
 }
 
 // Shared by Update() and SeedInitialAngle() — same formula, see the
@@ -178,14 +220,18 @@ void AttitudeEstimator::SeedInitialAngle(const Sample& sample)
 
 AttitudeEstimator::Output AttitudeEstimator::Update(const Sample& sample, uint32_t dt_ms)
 {
+    const float dt_ms_f = static_cast<float>(dt_ms);
+
     // Low-pass the raw sample first — everything below reads the
     // filtered values, never the raw sample directly. See the header's
-    // field comment for why (and for kComplementaryAlpha vs
-    // kGyroLowPassAlpha/kAccelLowPassAlpha being different things).
+    // field comment for why (and for kComplementaryTauMs vs
+    // kGyroLowPassTauMs/kAccelLowPassTauMs being different things).
     if (has_filtered_sample_) {
+        const float accel_alpha = ExpAlpha(dt_ms_f, kAccelLowPassTauMs);
+        const float gyro_alpha = ExpAlpha(dt_ms_f, kGyroLowPassTauMs);
         for (int i = 0; i < 3; ++i) {
-            filtered_accel_g_[i] = LowPass(sample.accel_g[i], filtered_accel_g_[i], kAccelLowPassAlpha);
-            filtered_gyro_dps_[i] = LowPass(sample.gyro_dps[i], filtered_gyro_dps_[i], kGyroLowPassAlpha);
+            filtered_accel_g_[i] = LowPass(sample.accel_g[i], filtered_accel_g_[i], accel_alpha);
+            filtered_gyro_dps_[i] = LowPass(sample.gyro_dps[i], filtered_gyro_dps_[i], gyro_alpha);
         }
     } else {
         for (int i = 0; i < 3; ++i) {
@@ -209,10 +255,16 @@ AttitudeEstimator::Output AttitudeEstimator::Update(const Sample& sample, uint32
 
     const bool in_valid_plane = std::fabs(filtered_accel_g_[2]) < kAzInvalidThresholdG;
 
+    // Computed unconditionally now (2026-09-06), not just inside the
+    // in_valid_plane branch — see Output::debug_accel_only_angle_deg. Cheap
+    // (one atan2), and having it even when !in_valid_plane lets the debug
+    // log show what accel was reading right up to/through a flip, not just
+    // once the blend starts trusting it again.
+    const float angle_from_accel = AngleFromAccel(filtered_accel_g_[0] - accel_bias_x_g_,
+                                                    filtered_accel_g_[1] - accel_bias_y_g_, face_a_offset_deg_);
+
     if (in_valid_plane) {
-        const float angle_from_accel = AngleFromAccel(filtered_accel_g_[0] - accel_bias_x_g_,
-                                                        filtered_accel_g_[1] - accel_bias_y_g_, face_a_offset_deg_);
-        angle_deg_ = BlendTowardAngle(angle_from_gyro, angle_from_accel, AccelTrustWeight(std::fabs(gz)));
+        angle_deg_ = BlendTowardAngle(angle_from_gyro, angle_from_accel, AccelTrustWeight(std::fabs(gz), dt_ms_f));
     } else {
         // Accel isn't trustworthy while the screen isn't facing the
         // user — fall back to pure gyro integration for this tick.
@@ -223,5 +275,8 @@ AttitudeEstimator::Output AttitudeEstimator::Update(const Sample& sample, uint32
     out.screen_angle_deg = angle_deg_;
     out.is_moving = GyroMagnitudeDps(gx, gy, gz) > kGyroMovingThresholdDps;
     out.in_valid_plane = in_valid_plane;
+    out.debug_gyro_only_angle_deg = angle_from_gyro;
+    out.debug_accel_only_angle_deg = angle_from_accel;
+    out.debug_gz_dps = gz;
     return out;
 }

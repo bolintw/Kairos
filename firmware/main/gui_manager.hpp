@@ -101,17 +101,34 @@ constexpr int32_t kRootHeightPx = 65;
 //      falling back to the slow buffer path anyway.
 //   3. Shrunk root_ to just the primary label's footprint (this version)
 //      with LV_DRAW_TRANSFORM_USE_MATRIX still on: crashed instead of
-//      hanging (Guru Meditation / LoadProhibited, NULL dest_buf inside
-//      LVGL's RGB565_SWAPPED glyph-mask blend). That matrix path appears
-//      to not correctly wire up the destination buffer for text glyphs
-//      under our custom LV_COLOR_FORMAT_RGB565_SWAPPED (needed to match
-//      LovyanGFX's byte order) — looks like an LVGL bug in a fairly
-//      unusual combination (non-default matrix path + non-default color
-//      format + glyph rendering), not something to work around here.
-//      LV_DRAW_TRANSFORM_USE_MATRIX turned back off in sdkconfig; the
-//      small root_ alone keeps the older buffer-based path (which does
-//      work correctly, just needed to stay small) fast and memory-safe
-//      without needing the matrix shortcut.
+//      hanging (Guru Meditation / LoadProhibited, NULL-ish dest_buf inside
+//      LVGL's RGB565_SWAPPED glyph-mask blend). LV_DRAW_TRANSFORM_USE_MATRIX
+//      turned back off in sdkconfig; the small root_ alone keeps the older
+//      buffer-based path (which does work correctly, just needed to stay
+//      small) fast and memory-safe without needing the matrix shortcut.
+//   4. Retried matrix (2026-09-06) after a main-loop timing breakdown
+//      showed root_'s buffer-based rotation redraw dominating (~97% of
+//      every second, throttling the whole sensor loop to ~10-14Hz instead
+//      of its designed ~120Hz) — theory this time was that the crash was
+//      specific to LV_COLOR_FORMAT_RGB565_SWAPPED (a non-default LVGL
+//      color format), so switched to plain LV_COLOR_FORMAT_RGB565 +
+//      lcd.setSwapBytes(true) (letting LovyanGFX handle the byte order
+//      instead) before re-enabling the matrix flag. Crashed anyway — same
+//      Guru Meditation, same draw_letter_cb -> lv_draw_sw_blend ->
+//      lv_draw_sw_blend_color_to_rgb565 (the *non*-swapped variant this
+//      time) via refr_obj_matrix, confirming the bug is in LVGL 9.5.0's
+//      matrix-transformed text-glyph rendering itself — independent of
+//      color format, so switching formats was never going to dodge it.
+//      Reverted both the color-format experiment and the matrix flag.
+//      Conclusion: the matrix path is not usable for a rotated object
+//      that contains live text on this LVGL version, full stop — not a
+//      config mistake to keep retrying. Any further throughput fix needs
+//      to either avoid re-rendering text glyphs every angle change (e.g.
+//      rasterize the label to a static bitmap once, rotate *that* via
+//      matrix instead of live glyph draws) or decouple rendering from the
+//      sensor loop entirely (a separate task/core, so root_'s redraw cost
+//      stops blocking IMU/AttitudeEstimator/AppController regardless of
+//      how expensive it stays) — neither attempted yet as of this note.
 // SetRotationDeg() takes screen_angle_deg directly — same CW-positive
 // convention as AttitudeEstimator — and negates it: LVGL's
 // transform_rotation is also CW-positive (matches its arc widget's
@@ -195,7 +212,38 @@ public:
     // class doc) so it stays upright as the physical device rotates.
     // screen_angle_deg: AttitudeEstimator::Output::screen_angle_deg,
     // straight from the estimator, no filtering applied here.
+    //
+    // Dirty-check widened from 0.1deg to 1deg + a kRotationUpdateMinIntervalUs
+    // floor between actual redraws (2026-09-06) — root_'s rotation uses
+    // LVGL's slow per-pixel software rotation path (the fast matrix path
+    // crashes under our RGB565_SWAPPED color format + text glyphs, see the
+    // class doc's crash history), and its rotated bounding box (200x65 at
+    // an arbitrary angle, diagonal ~209px) needs close to a full-height
+    // redraw every time it fires. The 0.1deg check alone was already known
+    // to fire ~30x/sec from plain sensor noise on a stationary mount (see
+    // GetUpdateCount()'s comment, confirmed 2026-08-25) — a per-second main
+    // loop timing breakdown (2026-09-06) tied that directly to the whole
+    // sensor loop being throttled to ~10-14Hz instead of its designed
+    // ~120Hz. Neither change touches what angle actually gets rendered
+    // (still full precision) — only how often the expensive redraw is
+    // allowed to happen.
     void SetRotationDeg(float screen_angle_deg);
+
+    // Recovers the display after RunIdleSleep() (M9, sleep_mode.hpp):
+    // re-runs the LCD panel's own init sequence (lcd_.init() — confirmed
+    // safe to call twice, see gui_manager.cpp) and forces every managed
+    // widget to redraw on the next lv_timer_handler() call, bypassing the
+    // value-unchanged checks below. Added 2026-09-06 after the panel
+    // showed nothing at all post-wake, backlight aside, across two
+    // different sleep implementations (manual esp_light_sleep_start(),
+    // then ESP-IDF's automatic PM-driven light sleep) — the fact that
+    // both hit the identical symptom points at something about the
+    // physical light-sleep transition itself needing the panel
+    // re-initialized, not at either sleep entry mechanism specifically.
+    // Call before restoring brightness (NotifyWokeFromIdleSleep()) — a
+    // full panel re-init could glitch backlight state along the way, so
+    // brightness needs to be reapplied after this, not before.
+    void ForceRedraw();
 
     // Counts real LVGL updates (SetPrimaryText/SetRotationDeg calls that
     // weren't skipped by the value-unchanged check below) — for a debug
@@ -223,7 +271,8 @@ private:
     // redraw/sec on their own, a stationary angle settles to ~0.
     char last_text_[32] = "";
     char last_secondary_text_[16] = "";
-    int32_t last_rotation_0p1_deg_ = 0;
+    int32_t last_rotation_1deg_ = 0;
+    int64_t last_rotation_update_us_ = 0;
     bool has_last_rotation_ = false;
     uint8_t last_ring_opa_ = 0;
     bool has_last_ring_opa_ = false;

@@ -161,6 +161,65 @@ public:
         WriteReg(kRegCtrl8, 0x01);  // enable tap detection (bit 0)
     }
 
+    // Switches between the constructor's normal 6DOF setup (accel+gyro
+    // both enabled) and accel-only — added 2026-09-06 for M9 idle sleep.
+    // Gyro draws roughly the same current regardless of ODR (QMI8658C.pdf
+    // Table 16 — cost of driving the MEMS resonator itself, not
+    // sample-rate-dependent), so disabling it is the only real lever for
+    // gyro's share; accel-only High-Resolution at 1000Hz (Table 15) is
+    // ~182uA versus the ~1mA this project measured with both enabled —
+    // most of the win, from gyro alone. Accepted trade-off: no gyro
+    // samples means no rotation-based wake while in this mode, tap
+    // detection only (still works — tap detection only ever needed
+    // accel, see ConfigureTap()).
+    //
+    // Deliberately does NOT also drop the accel ODR the way two earlier
+    // versions of this function did (Low Power mode at 128Hz, then
+    // High-Resolution at 125Hz) — both broke tap detection outright on
+    // hardware, not just made it less sensitive. In hindsight the ODR
+    // reduction was barely worth it anyway (134-182uA either way per
+    // Table 15, accel's own current barely varies across its
+    // High-Resolution ODR range) next to the risk: the tap engine's
+    // alpha/gamma coefficients (see ConfigureTap()'s comment) are the
+    // chip's own per-sample EMA weights, so they carry a real-time time
+    // constant that depends on ODR the same way this project's own
+    // software low-pass filters do (attitude_estimator.cpp) — dropping
+    // ODR ~7x means their effective time constants stretch ~7x too, and
+    // at 125Hz the math for the *original* gamma's implied time constant
+    // (~4.46ms at the real 896.8Hz 6DOF rate) works out to needing
+    // gamma > 1, not a representable coefficient at all. Keeping the
+    // accel ODR unchanged (CTRL2 stays 0x23 in both branches below, only
+    // CTRL7's enable bits move) sidesteps this entirely: the tap engine
+    // keeps running with the exact same tuning that's already been
+    // validated on hardware, whether or not gyro is also enabled.
+    //
+    // Toggling CTRL7 (this function's only job) latches a spurious
+    // STATUS1 tap flag, same quirk main.cpp already discards one
+    // PollTapEvent() for right after boot's ConfigureTap() call (which
+    // also toggles CTRL7). Callers of SetLowPowerAccelOnly(true) need to
+    // do the same discard before trusting the next real PollTapEvent() —
+    // skipped without it, RunIdleSleep() woke itself up immediately every
+    // time, reading that latched flag as a real tap (caught on hardware).
+    // enable=true also sets CTRL7.bit5 (DRDY_DIS, 2026-09-06) — datasheet
+    // Section 6.3: with DRDY_DIS=0 (the default, and what enable=false
+    // leaves it at), the accelerometer's Data-Ready signal is *also*
+    // routed to INT2/GPIO48 (same pin CTRL8.bit6=0 already sends tap
+    // events to, see ConfigureTap()'s CTRL8 write), pulsing at the accel
+    // ODR the whole time this mode is active. A GPIO-interrupt-driven
+    // wake (sleep_mode.cpp's diagnostic, replacing RunIdleSleep()'s fixed
+    // 1s poll — see plan doc's M9 section) needs INT2 to only pulse on a
+    // real tap; left at the default, the ESP32 would wake on every accel
+    // sample instead, defeating the whole point. Setting DRDY_DIS=1 here
+    // blocks DRDY from INT2 without touching accel sampling itself. Not
+    // set when enable=false since normal 6DOF operation never reads
+    // INT2 at all currently — harmless either way there, left at its
+    // default for now.
+    void SetLowPowerAccelOnly(bool enable)
+    {
+        if (!dev_) return;
+        WriteReg(kRegCtrl7, enable ? 0x21 : 0x03);  // accel-only+DRDY_DIS vs accel+gyro; CTRL2/tap CAL registers untouched
+    }
+
     // Polls for a new tap event. TAP_STATUS (0x59) holds the *type* of the
     // most recent tap, but its value doesn't change between two same-type
     // taps in a row, so diffing it directly misses repeats — that was this
@@ -177,10 +236,22 @@ public:
 
         uint8_t status1 = 0;
         if (!ReadRegs(kRegStatus1, &status1, 1)) return TapEvent::kNone;
+        // Temporary diagnostic (2026-09-06, M9 idle-sleep debugging) —
+        // print the raw byte whenever anything in it is set, not just the
+        // TAP bit we act on, so a run that spuriously wakes RunIdleSleep()
+        // shows exactly what STATUS1 actually looked like at that moment
+        // instead of us continuing to guess. Cheap to leave in: status1
+        // reads all-zero the overwhelming majority of the time in normal
+        // use, so this doesn't spam the log outside of taps/whatever this
+        // turns out to be.
+        if (status1 != 0) {
+            printf("Qmi8658::PollTapEvent: STATUS1=0x%02X\n", status1);
+        }
         if ((status1 & 0x02) == 0) return TapEvent::kNone;
 
         uint8_t tap_status = 0;
         if (!ReadRegs(kRegTapStatus, &tap_status, 1)) return TapEvent::kNone;
+        printf("Qmi8658::PollTapEvent: TAP bit set, TAP_STATUS=0x%02X\n", tap_status);
 
         switch (tap_status & 0x03) {
             case 1: return TapEvent::kSingle;

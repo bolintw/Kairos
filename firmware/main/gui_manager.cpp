@@ -2,6 +2,8 @@
 
 #include <cstring>
 
+#include "esp_timer.h"
+
 namespace {
 float Clamp01(float v)
 {
@@ -13,6 +15,13 @@ float Clamp01(float v)
 // See gui_manager.hpp's rotation design note — flip this to +1.0f if the
 // overlay turns out to spin the wrong way on real hardware.
 constexpr float kRotationSign = -1.0f;
+
+// See SetRotationDeg()'s comment — a floor on how often the expensive
+// rotated redraw is allowed to fire, independent of the sensor tick rate
+// (which this whole mechanism exists to stop throttling). ~30Hz: fast
+// enough that a flip still reads as smooth motion, far below the 120Hz
+// sensor rate this is decoupling the redraw cost from.
+constexpr int64_t kRotationUpdateMinIntervalUs = 33 * 1000;
 }  // namespace
 
 GuiManager::GuiManager(LGFX& lcd)
@@ -162,12 +171,42 @@ void GuiManager::SetRingOpacity(uint8_t opa)
 
 void GuiManager::SetRotationDeg(float screen_angle_deg)
 {
+    // Full precision still passed to LVGL below — only the *decision to
+    // redraw* is coarsened/throttled, see the header comment.
     const int32_t rot_0p1_deg = static_cast<int32_t>(kRotationSign * screen_angle_deg * 10.0f);
-    if (has_last_rotation_ && rot_0p1_deg == last_rotation_0p1_deg_) {
-        return;  // unchanged (in the 0.1-degree units LVGL sees) — see gui_manager.hpp
+    const int32_t rot_1deg = rot_0p1_deg / 10;
+
+    if (has_last_rotation_ && rot_1deg == last_rotation_1deg_) {
+        return;  // hasn't moved a full degree yet
     }
-    last_rotation_0p1_deg_ = rot_0p1_deg;
+    const int64_t now_us = esp_timer_get_time();
+    if (has_last_rotation_ && (now_us - last_rotation_update_us_) < kRotationUpdateMinIntervalUs) {
+        return;  // moved, but too soon after the last redraw
+    }
+
+    last_rotation_1deg_ = rot_1deg;
+    last_rotation_update_us_ = now_us;
     has_last_rotation_ = true;
     lv_obj_set_style_transform_rotation(root_, rot_0p1_deg, 0);
     ++update_count_;
+}
+
+void GuiManager::ForceRedraw()
+{
+    // Re-run the panel's own init sequence (RST toggle, GC9A01A memory
+    // access control / etc. register writes) — added 2026-09-06 after
+    // the "just invalidate everything" version alone didn't fix a blank
+    // screen post-RunIdleSleep() even after switching to ESP-IDF's
+    // automatic light sleep (see gui_manager.hpp's comment). Confirmed
+    // safe to call again post-boot by reading LovyanGFX's own source
+    // (platforms/esp32/common.cpp): the SPI bus setup is guarded by
+    // `if (_spi_dev_handle[spi_host] == nullptr)`, so a second init()
+    // call skips spi_bus_initialize()/spi_bus_add_device() entirely and
+    // only redoes the panel-level register setup — not a resource leak
+    // or a double-init failure. Call this before restoring brightness
+    // (AppController::NotifyWokeFromIdleSleep()), since a full panel
+    // re-init is exactly the kind of thing that could glitch the
+    // backlight state along the way.
+    lcd_.init();
+    lv_obj_invalidate(lv_screen_active());
 }
