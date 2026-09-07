@@ -19,6 +19,11 @@ constexpr gpio_num_t kImuInt2Gpio = GPIO_NUM_48;
 // before waking on its own regardless of GPIO activity.
 constexpr uint32_t kSleepBackstopMs = 1000;
 
+// Gates the SLEEP,err=...,cause=...,int2=... line below — see main.cpp's
+// kLoopTimingLogEnabled flag-layout note for why this is its own flag
+// rather than shared with anything else.
+constexpr bool kSleepDebugLogEnabled = true;
+
 }  // namespace
 
 // Manual esp_light_sleep_start() loop with a real GPIO wakeup source
@@ -85,13 +90,15 @@ void RunIdleSleep(Qmi8658& imu)
 
     while (true) {
         const esp_err_t err = esp_light_sleep_start();
-        // Temporary diagnostic, left in deliberately for now (2026-09-06)
-        // — cheap (once per real sleep attempt, not per tick), and this
-        // is exactly the data needed to tell "rejected" / "slept but
-        // GPIO didn't trigger" / other apart on real hardware instead of
-        // guessing again.
-        printf("SLEEP,err=%d,cause=%d,int2=%d\n", static_cast<int>(err),
-               static_cast<int>(esp_sleep_get_wakeup_cause()), gpio_get_level(kImuInt2Gpio));
+        // Diagnostic, left in deliberately (2026-09-06; gated behind
+        // kSleepDebugLogEnabled 2026-09-07) — cheap (once per real sleep
+        // attempt, not per tick), and this is exactly the data needed to
+        // tell "rejected" / "slept but GPIO didn't trigger" / other apart
+        // on real hardware instead of guessing again.
+        if (kSleepDebugLogEnabled) {
+            printf("SLEEP,err=%d,cause=%d,int2=%d\n", static_cast<int>(err),
+                   static_cast<int>(esp_sleep_get_wakeup_cause()), gpio_get_level(kImuInt2Gpio));
+        }
 
         // Wake-on-Motion (2026-09-06, wom-wake-mode branch — was
         // PollTapEvent()) — gyro is disabled for the duration of this

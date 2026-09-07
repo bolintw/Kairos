@@ -82,7 +82,18 @@ constexpr bool kDebugOverlayEnabled = true;
 // it dumps) stopped earning its cost. Back to the simple version; revisit
 // the buffered approach only if something *else* turns out to need
 // hiding I/O from the timing-critical window again.
-constexpr bool kAttitudeDebugLogEnabled = false;
+//
+// false -> true (2026-09-07): re-enabling to recollect an angle graph now
+// that the rotation feel itself is settled (gyro overshoot fix, adaptive
+// complementary filter, etc. — see gravity_timer_project_plan.md's M8/M9
+// notes) — this time checking the *numbers* line up with the good feel,
+// not just diagnosing a throughput bug. Kept deliberately separate from
+// kDebugOverlayEnabled/kLoopTimingLogEnabled (see the flag-layout note
+// just below kLoopTimingLogEnabled's declaration) rather than folding
+// into one shared flag — a clean ATT-only serial capture is the whole
+// point of a graphing session, and merging flags would spam LOOP/tap/WoM
+// status lines into the same stream.
+constexpr bool kAttitudeDebugLogEnabled = true;
 
 // Hold BOOT (GPIO0) this long, while the app is already running, to enter
 // calibration mode. NOT checked at power-on/reset — see calibration_mode.hpp.
@@ -551,7 +562,21 @@ extern "C" void app_main(void)
     // adding this. loop_count directly answers "how many times did the
     // outer while(true) actually run in the last second"; the four *_us
     // accumulators say which section it went into.
-    constexpr bool kLoopTimingLogEnabled = true;
+    //
+    // Flag layout note (2026-09-07) — this file now has four independent
+    // debug toggles (this one, kDebugOverlayEnabled, kAttitudeDebugLogEnabled,
+    // kRunWomEdgeTestOnBoot) plus a few more scattered in qmi8658.hpp/
+    // sleep_mode.cpp (see their own kQmi8658DebugLogEnabled/
+    // kSleepDebugLogEnabled). Deliberately NOT merged into one shared
+    // flag: kDebugOverlayEnabled is on-screen UI (harmless to always
+    // leave on, no serial cost), while the rest are serial printf streams
+    // that actively compete for the same UART — turning all of them on
+    // together interleaves LOOP/ATT/tap/WoM/sleep lines into one stream
+    // and defeats whichever one you actually meant to read (e.g. a clean
+    // ATT-only capture for graphing, this file's kAttitudeDebugLogEnabled
+    // right above, is the reason this one is off right now). Each stays
+    // its own bool, flip only the ones relevant to what's being debugged.
+    constexpr bool kLoopTimingLogEnabled = false;
     uint32_t loop_count = 0;
     int64_t tap_poll_accum_us = 0;
     int64_t sensor_block_accum_us = 0;

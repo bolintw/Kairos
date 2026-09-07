@@ -23,6 +23,19 @@
 // Whether AttitudeEstimator (M5) shares a bus with this or replaces it
 // entirely is an open design question for that milestone, not decided
 // here — this class exists only to drive the M3/M4 debug overlay.
+//
+// Gates PollWomEvent()'s/PollTapEvent()'s STATUS1 (and TAP_STATUS)
+// prints — real errors (I2C bus/device creation failure, soft reset not
+// confirming, CTRL9 handshake failure) always print regardless, those
+// aren't routine noise. This is a header included from multiple .cpp
+// files, so this constant deliberately isn't a class member — a plain
+// file-scope constexpr gets its own internal-linkage copy per
+// translation unit, no ODR issue, no need to plumb it through the
+// constructor just to toggle a printf. See main.cpp's
+// kLoopTimingLogEnabled flag-layout note for why this stays independent
+// from that file's own debug flags rather than sharing one.
+constexpr bool kQmi8658DebugLogEnabled = true;
+
 class Qmi8658 {
 public:
     struct Sample {
@@ -145,17 +158,28 @@ public:
         // 110=1024, 111=2048 dps. 0x43 = 0100_0011 -> bits[6:4]=100 ->
         // *256dps*. This was originally a bug (code assumed 512dps, see
         // git history 2026-08-24) causing every dps reading to be 2x true
-        // value — but 256dps turns out to be the range we actually want:
-        // narrower range means more LSB/dps (128 here vs 64 at 512dps),
-        // so the same ADC noise floor converts to less dps noise, and
-        // typical desk-flip angular rates shouldn't approach 256dps
-        // anyway. Kept at 0x43 deliberately now, with kGyroLsbPerDps
-        // matching it below. Risk: a fast/hard flip that does exceed
-        // 256dps will clip instead of overshooting — the opposite
-        // failure mode (silent under-read instead of obvious overshoot,
-        // easy to miss) — revisit at M10 assembly-time tuning if that
-        // turns out to matter in practice; bits[3:0]=0011 (1000Hz ODR).
-        WriteReg(kRegCtrl3, 0x43);  // +-256dps range, 1000Hz ODR
+        // value — kept at 256dps deliberately for a while afterward
+        // (narrower range = more LSB/dps = less dps noise for the same
+        // ADC noise floor), on the assumption typical desk-flip rates
+        // wouldn't approach 256dps. That assumption didn't hold up: a
+        // 2026-09-07 angle-graphing session (kAttitudeDebugLogEnabled,
+        // main.cpp) caught real flips peaking at ~250-252 dps — within
+        // ~2% of the 256dps ceiling, on ordinary flips, not a
+        // deliberately hard one. Worse, the main loop's tick period is
+        // still ~90-140ms (see gravity_timer_project_plan.md's main-loop
+        // throughput notes) — far coarser than kGyroLowPassTauMs's 6ms
+        // time constant, so that filter barely smooths anything at this
+        // tick rate and a peak between two samples could be missed
+        // entirely, meaning the true instantaneous peak could already be
+        // higher than what got logged. 0x43 -> 0x53 (sets bit4, bits[6:4]
+        // 100->101 i.e. 256->512dps) trades some of that noise-floor
+        // margin back for headroom against silent clipping (clipping
+        // under-reads the angle rather than overshooting it — a quieter,
+        // easier-to-miss failure than the overshoot bug this range change
+        // originally fixed), matching this comment's own predicted
+        // trigger for revisiting it. kGyroLsbPerDps below updated to
+        // match; bits[3:0]=0011 (1000Hz ODR) unchanged.
+        WriteReg(kRegCtrl3, 0x53);  // +-512dps range, 1000Hz ODR
         WriteReg(kRegCtrl5, 0x00);
         WriteReg(kRegCtrl7, 0x03);  // accel + gyro enable
     }
@@ -421,7 +445,7 @@ public:
         if (!dev_) return false;
         uint8_t status1 = 0;
         if (!ReadRegs(kRegStatus1, &status1, 1)) return false;
-        if (status1 != 0) {
+        if (kQmi8658DebugLogEnabled && status1 != 0) {
             printf("Qmi8658::PollWomEvent: STATUS1=0x%02X\n", status1);
         }
         return (status1 & 0x04) != 0;
@@ -443,22 +467,25 @@ public:
 
         uint8_t status1 = 0;
         if (!ReadRegs(kRegStatus1, &status1, 1)) return TapEvent::kNone;
-        // Temporary diagnostic (2026-09-06, M9 idle-sleep debugging) —
-        // print the raw byte whenever anything in it is set, not just the
-        // TAP bit we act on, so a run that spuriously wakes RunIdleSleep()
-        // shows exactly what STATUS1 actually looked like at that moment
-        // instead of us continuing to guess. Cheap to leave in: status1
-        // reads all-zero the overwhelming majority of the time in normal
-        // use, so this doesn't spam the log outside of taps/whatever this
-        // turns out to be.
-        if (status1 != 0) {
+        // Diagnostic (2026-09-06, M9 idle-sleep debugging; gated behind
+        // kQmi8658DebugLogEnabled 2026-09-07) — print the raw byte
+        // whenever anything in it is set, not just the TAP bit we act on,
+        // so a run that spuriously wakes RunIdleSleep() shows exactly
+        // what STATUS1 actually looked like at that moment instead of us
+        // continuing to guess. Cheap to leave in even when enabled:
+        // status1 reads all-zero the overwhelming majority of the time in
+        // normal use, so this doesn't spam the log outside of taps/
+        // whatever this turns out to be.
+        if (kQmi8658DebugLogEnabled && status1 != 0) {
             printf("Qmi8658::PollTapEvent: STATUS1=0x%02X\n", status1);
         }
         if ((status1 & 0x02) == 0) return TapEvent::kNone;
 
         uint8_t tap_status = 0;
         if (!ReadRegs(kRegTapStatus, &tap_status, 1)) return TapEvent::kNone;
-        printf("Qmi8658::PollTapEvent: TAP bit set, TAP_STATUS=0x%02X\n", tap_status);
+        if (kQmi8658DebugLogEnabled) {
+            printf("Qmi8658::PollTapEvent: TAP bit set, TAP_STATUS=0x%02X\n", tap_status);
+        }
 
         switch (tap_status & 0x03) {
             case 1: return TapEvent::kSingle;
@@ -494,7 +521,7 @@ private:
     static constexpr uint8_t kCmdWriteWomSetting = 0x08;
 
     static constexpr float kAccelLsbPerG = 4096.0f;   // +-8g range
-    static constexpr float kGyroLsbPerDps = 128.0f;   // +-256dps range (32768/256)
+    static constexpr float kGyroLsbPerDps = 64.0f;    // +-512dps range (32768/512), see CTRL3=0x53 above
 
     void WriteReg(uint8_t reg, uint8_t value)
     {
