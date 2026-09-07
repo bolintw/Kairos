@@ -251,6 +251,27 @@
 //    session — and matters more now than it did for tap-only wake, since
 //    a wider set of events can trigger this wake at all.
 //
+//    Double-tap-to-wake (2026-09-07): the trade-off above turned out to
+//    bite harder than expected on real hardware — even with
+//    Qmi8658::EnterWakeOnMotion()'s threshold maxed out at the register's
+//    255 ceiling, an incidental hand bump near the device was still
+//    enough to trigger a wake. Fixed one level below this class, entirely
+//    inside main.cpp's idle-sleep block: a WoM trigger no longer wakes on
+//    its own. It's a silent pre-wake — screen stays off, ShouldEnterIdleSleep()
+//    stays satisfied — until a second, genuinely separate tap lands within
+//    a short window (kWomConfirmWindowMs) right after. Only that combination
+//    calls NotifyWokeFromIdleSleep(). This is now a deliberate two-tap
+//    wake gesture, not just a debounce — a single tap can't satisfy both
+//    stages back-to-back on this hardware (the tap engine isn't running
+//    yet at the instant of the physical tap; still in WoM mode until
+//    RunIdleSleep() returns), so waking the device for real always takes
+//    two distinct taps: one to leave WoM/light-sleep, one to confirm.
+//    Combined with the "distinct subsequent tap to resume" rule just
+//    above, running a paused timer from a full idle sleep now takes
+//    three taps total: two to wake the screen, one more to actually
+//    start it — all in service of the same goal, an incidental bump
+//    should never be mistaken for intent.
+//
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
 // double-integrating the gyro angle) and passes the resulting Output in.

@@ -126,13 +126,9 @@ constexpr float kTapUdmThr = 0.4f;
 //     suggests the chip's WoM is just inherently this sensitive by
 //     design (matches EnterWakeOnMotion()'s own already-documented
 //     trade-off: wakes on any sufficiently large accelerometer slope, not
-//     specifically a deliberate tap). If 255 is still oversensitive, the
-//     threshold register itself is maxed out and any further filtering
-//     has to happen in software (e.g. requiring the WoM flag to still be
-//     set across more than one RunIdleSleep() backstop-timer cycle before
-//     actually waking the UI, rather than trusting the very first
-//     ESP_SLEEP_WAKEUP_GPIO) — not implemented yet, next step if this
-//     doesn't land.
+//     specifically a deliberate tap). Register maxed out at this point —
+//     the two-stage-wake constants just below are the software-side
+//     filter that turned out to be needed on top of it.
 //   - kWomBlankingSamples: 6-bit field, max 63 (~63ms at the 1000Hz accel
 //     ODR CTRL2 is already configured for). Set to the max as a
 //     conservative starting point, on the theory that entering WoM mode
@@ -144,6 +140,22 @@ constexpr float kTapUdmThr = 0.4f;
 //     layer of defense either way.
 constexpr uint8_t kWomThresholdMg = 255;
 constexpr uint8_t kWomBlankingSamples = 63;
+
+// Two-stage WoM wake confirmation (2026-09-07) — see the idle-sleep
+// block's own comment for the full rationale. This is a deliberate
+// double-tap-to-wake gesture, not just a debounce: on real hardware, a
+// single physical tap only ever registers on whichever detector is
+// active at that instant (WoM here, since the tap engine isn't running
+// during light sleep), so this window doesn't catch the *same* tap's
+// tail end — it waits for a genuinely separate, second tap. Landed on
+// 500ms (2026-09-07, was 1000ms) after hands-on testing: long enough for
+// a deliberate two-tap gesture's natural rhythm, short enough to feel
+// like one motion rather than two disconnected ones — not yet re-tested
+// against the finished enclosure/battery, may still move. kWomConfirmPollMs
+// matches the poll cadence already used elsewhere in this same function's
+// WoM-entry discard loop.
+constexpr int kWomConfirmWindowMs = 500;
+constexpr int kWomConfirmPollMs = 20;
 
 static LGFX lcd;
 // Two buffers now (2026-09-06, was one) — see lvgl_flush_cb()'s
@@ -661,34 +673,91 @@ extern "C" void app_main(void)
                     // sleep's level-wakeup detector — see qmi8658.hpp's
                     // EnterWakeOnMotion() comment). Same accel-only power
                     // draw as before, different wake signal.
-                    imu.EnterWakeOnMotion(kWomThresholdMg, kWomBlankingSamples);
-                    // Discard window for the same class of spurious
-                    // STATUS1 latch the old SetLowPowerAccelOnly(true)
-                    // needed one for (CTRL7 toggle -> one transient the
-                    // motion-detection front-end reads as real) — see
-                    // kWomBlankingSamples' comment above for why this is
-                    // still here even though WoM has its own built-in
-                    // blanking window.
-                    for (int i = 0; i < 30; ++i) {
-                        (void)imu.PollWomEvent();
-                        vTaskDelay(pdMS_TO_TICKS(20));
+                    //
+                    // Double-tap-to-wake (2026-09-07 — was going to be a
+                    // plain confirmation debounce, turned into an
+                    // intentional gesture once hardware testing showed
+                    // what it actually takes): WoM alone is a pre-wake,
+                    // not a real one — even at the WoM threshold
+                    // register's ceiling (kWomThresholdMg=255, see its own
+                    // comment), an incidental hand bump near the device
+                    // was still enough to trigger it. Rather than lighting
+                    // the screen on every WoM event, this loop keeps the
+                    // screen off and demands a real tap — via the same tap
+                    // engine already trusted for the "distinct second tap
+                    // to resume" gate below — within a bounded window
+                    // (kWomConfirmWindowMs) right after each WoM pre-wake
+                    // before treating it as a genuine wake. No tap in that
+                    // window means straight back into WoM/light-sleep,
+                    // screen never touched.
+                    //
+                    // Originally expected a single "pick up and tap"
+                    // motion to satisfy both stages back-to-back (WoM
+                    // catching the start of the motion, the tap engine
+                    // catching the strike a beat later) — on real
+                    // hardware it doesn't work that way: the tap engine
+                    // isn't running yet at the instant the physical tap
+                    // happens (still in WoM mode until RunIdleSleep()
+                    // returns and ConfigureTap() finishes), so it never
+                    // sees that same tap's tail end, only ever a genuinely
+                    // separate second one. Decided to keep it anyway
+                    // rather than work around it — a deliberate two-tap
+                    // wake gesture is a reasonable, fairly common pattern
+                    // in its own right (matches this project's existing
+                    // "friction against accidental resume" philosophy —
+                    // design note 9 in app_controller.hpp — one level
+                    // earlier than where that friction used to start).
+                    bool wom_confirmed_by_tap = false;
+                    while (!wom_confirmed_by_tap) {
+                        imu.EnterWakeOnMotion(kWomThresholdMg, kWomBlankingSamples);
+                        // Discard window for the same class of spurious
+                        // STATUS1 latch the old SetLowPowerAccelOnly(true)
+                        // needed one for (CTRL7 toggle -> one transient the
+                        // motion-detection front-end reads as real) — see
+                        // kWomBlankingSamples' comment above for why this is
+                        // still here even though WoM has its own built-in
+                        // blanking window.
+                        for (int i = 0; i < 30; ++i) {
+                            (void)imu.PollWomEvent();
+                            vTaskDelay(pdMS_TO_TICKS(20));
+                        }
+                        RunIdleSleep(imu);
+                        imu.ExitWakeOnMotion();
+                        // ExitWakeOnMotion() deliberately leaves CTRL7
+                        // disabled (see its own comment) — ConfigureTap()
+                        // both restores normal 6DOF operation (its own final
+                        // CTRL7=0x03 write) and re-establishes the tap
+                        // engine's thresholds, which aren't guaranteed to
+                        // have survived a WoM configuration cycle reusing the
+                        // same CAL1-4 scratch registers.
+                        imu.ConfigureTap(kTapPriority, kTapPeakWindow, kTapTapWindow, kTapDTapWindow,
+                                          kTapAlpha, kTapGamma, kTapPeakMagThr, kTapUdmThr);
+                        // Same spurious-latch quirk as the boot-time
+                        // ConfigureTap() call — discard it here too so the
+                        // confirmation poll below isn't immediately misread
+                        // as a tap that just happened.
+                        (void)imu.PollTapEvent();
+
+                        // Confirmation window — screen still off. Real
+                        // sensor polling here, not light sleep: this only
+                        // runs right after a WoM trigger (infrequent), and
+                        // needs the tap engine actively running, which
+                        // light sleep's GPIO wakeup doesn't need but a
+                        // synchronous poll loop does.
+                        for (int elapsed_ms = 0; elapsed_ms < kWomConfirmWindowMs;
+                             elapsed_ms += kWomConfirmPollMs) {
+                            if (imu.PollTapEvent() != Qmi8658::TapEvent::kNone) {
+                                wom_confirmed_by_tap = true;
+                                break;
+                            }
+                            vTaskDelay(pdMS_TO_TICKS(kWomConfirmPollMs));
+                        }
+                        // Falls through to re-enter WoM at the top of the
+                        // loop if the window closed with no tap — same
+                        // ConfigureTap()->EnterWakeOnMotion() register
+                        // reuse the normal exit path already does, no
+                        // special-case teardown needed either way.
                     }
-                    RunIdleSleep(imu);
-                    imu.ExitWakeOnMotion();
-                    // ExitWakeOnMotion() deliberately leaves CTRL7
-                    // disabled (see its own comment) — ConfigureTap()
-                    // both restores normal 6DOF operation (its own final
-                    // CTRL7=0x03 write) and re-establishes the tap
-                    // engine's thresholds, which aren't guaranteed to
-                    // have survived a WoM configuration cycle reusing the
-                    // same CAL1-4 scratch registers.
-                    imu.ConfigureTap(kTapPriority, kTapPeakWindow, kTapTapWindow, kTapDTapWindow,
-                                      kTapAlpha, kTapGamma, kTapPeakMagThr, kTapUdmThr);
-                    // Same spurious-latch quirk as the boot-time
-                    // ConfigureTap() call — discard it here too so the
-                    // next real PollTapEvent() isn't immediately misread
-                    // as a tap that just happened.
-                    (void)imu.PollTapEvent();
                     // Gyro Turn On Time is 150ms + 3/ODR per the
                     // QMI8658C datasheet (Tables 7/8) — the gyroscope's
                     // MEMS resonator needs real physical spin-up time
