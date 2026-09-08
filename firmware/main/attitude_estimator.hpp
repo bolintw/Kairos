@@ -59,17 +59,21 @@ public:
                                   // sensitive in practice (e.g. waking
                                   // mid-work from an unrelated bump),
                                   // revisit narrowing back to GZ-only.
-        bool in_valid_plane;     // true while |AZ| stays under a
-                                  // threshold, i.e. the screen is actually
-                                  // facing the user. AppController treats
-                                  // false here as "put the screen to
-                                  // sleep" — low confidence in
-                                  // screen_angle_deg, and not a state
-                                  // expected to be held during normal use,
-                                  // so there's nothing meaningful left to
-                                  // display. This class only reports the
-                                  // fact; the sleep *decision* stays in
-                                  // AppController, same as Face.
+        bool in_valid_plane;     // true while |AZ| stays within a
+                                  // hysteresis band (see
+                                  // attitude_estimator.cpp's
+                                  // kAzInvalidEnterThresholdG/
+                                  // kAzValidReturnThresholdG), i.e. the
+                                  // screen is genuinely facing the user —
+                                  // low confidence in screen_angle_deg
+                                  // while false. AppController (2026-09-08)
+                                  // uses a sustained false here, held for a
+                                  // couple seconds, as the "pick the device
+                                  // up to check battery" gesture — see its
+                                  // showing_battery_ design note. This
+                                  // class only reports the fact; what it
+                                  // means stays in AppController, same as
+                                  // Face.
 
         // Diagnostic-only fields (2026-09-06), not used by AppController —
         // added to actually see, rather than guess, what's happening
@@ -184,4 +188,11 @@ private:
     float filtered_accel_g_[3] = {0.0f, 0.0f, 0.0f};
     float filtered_gyro_dps_[3] = {0.0f, 0.0f, 0.0f};
     bool has_filtered_sample_ = false;
+
+    // Schmitt-trigger state for Output::in_valid_plane (2026-09-08) — see
+    // attitude_estimator.cpp's kAzInvalidEnterThresholdG/
+    // kAzValidReturnThresholdG comment. Defaults true (assume valid until
+    // proven otherwise); SeedInitialAngle() re-seeds it from a real sample
+    // if called before the first Update().
+    bool in_valid_plane_ = true;
 };

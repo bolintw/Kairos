@@ -11,7 +11,27 @@ constexpr float kRadToDeg = 180.0f / kPi;
 // header's OPEN items this resolves. Adjust while watching the debug
 // overlay and re-flashing.
 constexpr float kGyroMovingThresholdDps = 20.0f;
-constexpr float kAzInvalidThresholdG = 0.3f;
+// Hysteresis band (2026-09-08, for the battery-check gesture — see
+// app_controller.hpp's design note on showing_battery_): a single 0.3g
+// threshold flip-flopped right at the boundary, which matters more now
+// than it used to since AppController debounces entry/exit with a
+// multi-second hold timer — any single-tick bounce back across a plain
+// threshold resets that timer's accumulation to 0. Split into two:
+// kAzInvalidEnterThresholdG (must clear this to leave the valid plane)
+// well above kAzValidReturnThresholdG (must drop back under this to
+// return) — 0.7g/0.3g chosen deliberately far apart (this is meant to be
+// a real "pick the device up and hold it at an angle" gesture, not a
+// small resting tilt) rather than a narrow band just wide enough to stop
+// chatter. Also used by Update()'s own accel-trust fallback below, not
+// just the exposed Output::in_valid_plane — same signal, one mechanism,
+// benefits both call sites (see AttitudeEstimator::in_valid_plane_'s
+// field comment).
+// 0.7/0.3 -> 0.9/0.5 (2026-09-08, first-hardware-pass feedback) — same
+// 0.4g band width, shifted up: entry needs an even more deliberate hold-up
+// motion, exit still noticeably easier than entry but no longer as easy
+// as the original single 0.3g threshold was.
+constexpr float kAzInvalidEnterThresholdG = 0.9f;
+constexpr float kAzValidReturnThresholdG = 0.5f;
 // History: 0.98 -> 0.5 -> 0.8 -> 0.95 -> 0.9 (2026-08-24, final for now).
 // 0.98 took ~17s to converge (matched the earlier "low tens of seconds"
 // hardware report). 0.5
@@ -210,7 +230,15 @@ void AttitudeEstimator::CalibrateGyroZeroOffset(const Sample& stationary_sample)
 
 void AttitudeEstimator::SeedInitialAngle(const Sample& sample)
 {
-    const bool in_valid_plane = std::fabs(sample.accel_g[2]) < kAzInvalidThresholdG;
+    // One-shot check at boot, before in_valid_plane_'s hysteresis has any
+    // history to run on — uses the (lower/stricter-for-"valid") return
+    // threshold directly as a simple "is this sample trustworthy enough
+    // to seed from" gate, and also seeds in_valid_plane_ itself so the
+    // very first real Update() call's hysteresis starts from a state that
+    // actually matches the boot orientation instead of always assuming
+    // true.
+    const bool in_valid_plane = std::fabs(sample.accel_g[2]) < kAzValidReturnThresholdG;
+    in_valid_plane_ = in_valid_plane;
     if (!in_valid_plane) {
         return;  // leave angle_deg_ at its default; Update() converges normally
     }
@@ -253,7 +281,19 @@ AttitudeEstimator::Output AttitudeEstimator::Update(const Sample& sample, uint32
     const float angle_from_gyro =
         WrapDeg180(angle_deg_ + gz * (static_cast<float>(dt_ms) / 1000.0f));
 
-    const bool in_valid_plane = std::fabs(filtered_accel_g_[2]) < kAzInvalidThresholdG;
+    // Schmitt-trigger hysteresis on |AZ| — see kAzInvalidEnterThresholdG's
+    // comment. in_valid_plane_ only flips when the *current* threshold for
+    // its *current* state is crossed; otherwise it holds.
+    if (in_valid_plane_) {
+        if (std::fabs(filtered_accel_g_[2]) >= kAzInvalidEnterThresholdG) {
+            in_valid_plane_ = false;
+        }
+    } else {
+        if (std::fabs(filtered_accel_g_[2]) < kAzValidReturnThresholdG) {
+            in_valid_plane_ = true;
+        }
+    }
+    const bool in_valid_plane = in_valid_plane_;
 
     // Computed unconditionally now (2026-09-06), not just inside the
     // in_valid_plane branch — see Output::debug_accel_only_angle_deg. Cheap

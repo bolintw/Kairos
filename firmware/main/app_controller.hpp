@@ -272,6 +272,56 @@
 //    start it — all in service of the same goal, an incidental bump
 //    should never be mistaken for intent.
 //
+// 10. Battery-check gesture (2026-09-08): picking the device up and
+//     holding it (tilting it out of the tracked rotation plane —
+//     AttitudeEstimator::Output::in_valid_plane going false, now
+//     hysteresis-debounced at the source, see that class's
+//     kAzInvalidEnterThresholdG/kAzValidReturnThresholdG) for
+//     kBatteryViewEnterMs shows a 5-block battery-level gauge instead of
+//     the current face; holding the device back in-plane for
+//     kBatteryViewExitMs returns to normal. Deliberately NOT a Face:
+//     showing_battery_ doesn't touch current_/current_face_ at all — the
+//     underlying face's onTick() keeps running the whole time (a
+//     Pomodoro phase keeps counting down while you check the battery),
+//     only render() is swapped out (GuiManager::ShowBatteryView()) and
+//     face-switch/tap logic is suppressed for the duration, same "nothing
+//     to save/restore" shape as idle sleep (design note 9) — there's just
+//     nothing state-worthy about "the screen currently shows a different
+//     thing".
+//
+//     Why hysteresis had to move into AttitudeEstimator rather than
+//     living here like the other debouncing in this file
+//     (kFaceHysteresisLeaveDeg, kTapMuteAfterSwitchMs): those work on a
+//     single already-hysteresis'd or edge-triggered signal, but
+//     in_valid_plane wasn't hysteresis'd at all before this — a plain
+//     single-threshold boolean bouncing across its boundary would keep
+//     resetting battery_view_hold_ms_'s accumulation to 0, since this
+//     class only sees the boolean, not the underlying |AZ| value needed
+//     to build a band on top of it. Fixing it at the source also quietly
+//     improves AttitudeEstimator's own internal accel-trust fallback
+//     (Update()'s in_valid_plane branch), which had the identical
+//     boundary-chatter exposure already, just never mattered enough to
+//     notice before this.
+//
+//     Entry threshold intentionally not a small resting tilt (0.7g) —
+//     this is meant to require a real "pick it up and hold it at an
+//     angle" motion, not fire from a light nudge. Exit threshold (0.3g)
+//     matches the original pre-hysteresis single value, chosen to make
+//     returning to normal comparatively easy once you set the device back
+//     down.
+//
+//     Known gap, not hidden: while showing_battery_, idle-sleep's own
+//     countdown (design note 9) is untouched — it only ever advances
+//     while the underlying face reports !is_running anyway, so checking
+//     the battery while a timer is actively running never idle-sleeps
+//     regardless. The plan-doc's low-battery-safety-net design calls for
+//     "stays lit while charging, sleeps anyway if not" — not implemented
+//     yet, since that needs a real voltage-trend read over time (no STAT
+//     pin wired to a GPIO on this board) that doesn't exist until the ADC
+//     side of this feature is built; revisit once it is. Battery level
+//     itself is a stub for the same reason — see kStubBatteryFilledBlocks
+//     in app_controller.cpp.
+//
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
 // double-integrating the gyro angle) and passes the resulting Output in.
@@ -307,6 +357,7 @@ private:
     std::unique_ptr<TimerFace> CreateFace(Face face);  // the "Factory"
     void UpdateBrightness(uint32_t dt_ms, bool is_moving);  // see design note 5 above
     void UpdateRing();  // see design note 7 above
+    void UpdateBatteryView(const AttitudeEstimator::Output& attitude, uint32_t dt_ms);  // see design note 10 above
 
     GuiManager& gui_manager_;
     std::unique_ptr<TimerFace> current_;  // nullptr while on face D
@@ -320,4 +371,7 @@ private:
     uint32_t prev_remaining_ms_ = 0;
 
     uint32_t tap_mute_remaining_ms_ = 0;  // see design note 6
+
+    bool showing_battery_ = false;         // see design note 10
+    uint32_t battery_view_hold_ms_ = 0;    // ms continuously in the state opposite showing_battery_'s current value
 };

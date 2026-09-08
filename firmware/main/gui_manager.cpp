@@ -22,6 +22,34 @@ constexpr float kRotationSign = -1.0f;
 // enough that a flip still reads as smooth motion, far below the 120Hz
 // sensor rate this is decoupling the redraw cost from.
 constexpr int64_t kRotationUpdateMinIntervalUs = 33 * 1000;
+
+// Battery band geometry (2026-09-08) — see SetBatteryLevel()'s header
+// comment. kBatteryBlockCount full-width rectangles stacked vertically to
+// exactly cover the panel height, each kPanelSizePx/kBatteryBlockCount
+// tall minus kBatteryBandGapPx split across its top/bottom edges so
+// adjacent bands show a thin dark seam between them (the "cut" lines) —
+// no per-height chord-width math needed, the round bezel already clips
+// whatever's drawn to the visible circle.
+// 3 -> 14 -> 10 (2026-09-08) — 14 was a bit too thick once the corner
+// radius settled down to a gentle fillet (kBandCornerRadiusPx in the
+// constructor) instead of the earlier pill-cap shape; landed on 10.
+constexpr int32_t kBatteryBandGapPx = 10;
+
+// One fixed color per fill count, red (1 band) -> green
+// (GuiManager::kBatteryBlockCount bands) — see SetBatteryLevel()'s
+// header comment for why this is a single accent color per level rather
+// than a per-band gradient. Starting palette, not tuned against the
+// real panel yet.
+lv_color_t BatteryTierColor(int filled_blocks)
+{
+    switch (filled_blocks) {
+        case 1: return lv_color_make(210, 50, 50);    // red
+        case 2: return lv_color_make(220, 120, 40);   // orange
+        case 3: return lv_color_make(210, 190, 40);   // yellow
+        case 4: return lv_color_make(150, 195, 50);   // yellow-green
+        default: return lv_color_make(60, 175, 80);   // green (5+)
+    }
+}
 }  // namespace
 
 GuiManager::GuiManager(LGFX& lcd)
@@ -97,6 +125,63 @@ GuiManager::GuiManager(LGFX& lcd)
     lv_obj_set_style_border_width(ring_, kRingWidthPx, 0);
     lv_obj_set_style_border_color(ring_, lv_color_white(), 0);
     lv_obj_set_style_border_opa(ring_, LV_OPA_TRANSP, 0);
+
+    // Battery bands (2026-09-08) — see the header's kBatteryBlockCount
+    // comment. Plain children of lv_screen_active(), same non-rotating
+    // treatment as ring_ above. Hidden by default; ShowBatteryView(true)
+    // reveals them. Each starts as an "empty" dim band — SetBatteryLevel()
+    // fills in the actual state before the view is ever shown to a user
+    // (AppController calls it every tick while showing_battery_ is true).
+    // Plain lv_obj rectangles, not a special widget: a full-width bar is
+    // exactly what lv_obj_create + a bg color already does, no arc/shape
+    // API needed once the shape wanted is horizontal stripes rather than
+    // radial slices.
+    {
+        // Non-uniform band heights (2026-09-08) — equal fifths read too
+        // mechanical; the user wants the middle band biggest, tapering
+        // toward the top/bottom, with corners just gently filleted rather
+        // than the full pill-cap shape tried first (kBandCornerRadiusPx
+        // below, not height/2 anymore). Weights are relative, indexed the
+        // same as battery_bands_ (i=0 bottom/fills-first .. top),
+        // symmetric around the middle (index 2) band. Boundaries computed
+        // via a running *cumulative* weight->pixel conversion, each
+        // rounded independently only at the cumulative point — not each
+        // band's height rounded on its own — so the 5 heights still sum to
+        // exactly kPanelSizePx with no stray 1px gap or overlap from
+        // independent rounding error.
+        constexpr float kBatteryBandWeights[kBatteryBlockCount] = {1.0f, 1.35f, 1.7f, 1.35f, 1.0f};
+        float total_weight = 0.0f;
+        for (float w : kBatteryBandWeights) total_weight += w;
+
+        int32_t cum_height_px[kBatteryBlockCount + 1];
+        cum_height_px[0] = 0;
+        float cum_weight = 0.0f;
+        for (int i = 0; i < kBatteryBlockCount; ++i) {
+            cum_weight += kBatteryBandWeights[i];
+            cum_height_px[i + 1] = static_cast<int32_t>(kPanelSizePx * cum_weight / total_weight + 0.5f);
+        }
+        cum_height_px[kBatteryBlockCount] = kPanelSizePx;  // force exact total, absorb float rounding drift
+
+        constexpr int32_t kBandCornerRadiusPx = 10;
+        for (int i = 0; i < kBatteryBlockCount; ++i) {
+            // i=0 is the bottom band (see header comment — fills
+            // bottom-up), so its pixel range is the last slot counting
+            // down from the panel's bottom edge.
+            const int32_t band_height_px = cum_height_px[i + 1] - cum_height_px[i];
+            const int32_t y_top = kPanelSizePx - cum_height_px[i + 1];
+            const int32_t draw_height_px = band_height_px - kBatteryBandGapPx;
+            lv_obj_t* band = lv_obj_create(lv_screen_active());
+            lv_obj_remove_style_all(band);
+            lv_obj_set_size(band, kPanelSizePx, draw_height_px);
+            lv_obj_set_pos(band, 0, y_top + kBatteryBandGapPx / 2);
+            lv_obj_set_style_radius(band, kBandCornerRadiusPx, 0);
+            lv_obj_set_style_bg_opa(band, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(band, lv_color_make(60, 60, 60), 0);  // dim/"empty" default
+            lv_obj_remove_flag(band, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_flag(band, LV_OBJ_FLAG_HIDDEN);
+            battery_bands_[i] = band;
+        }
+    }
 }
 
 void GuiManager::SetPrimaryText(const char* text)
@@ -188,6 +273,52 @@ void GuiManager::SetRotationDeg(float screen_angle_deg)
     last_rotation_update_us_ = now_us;
     has_last_rotation_ = true;
     lv_obj_set_style_transform_rotation(root_, rot_0p1_deg, 0);
+    ++update_count_;
+}
+
+void GuiManager::ShowBatteryView(bool show)
+{
+    if (show == showing_battery_view_) {
+        return;  // unchanged — same dirty-check reasoning as the rest of this class
+    }
+    showing_battery_view_ = show;
+    if (show) {
+        lv_obj_add_flag(root_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ring_, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < kBatteryBlockCount; ++i) {
+            lv_obj_clear_flag(battery_bands_[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    } else {
+        lv_obj_clear_flag(root_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(ring_, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < kBatteryBlockCount; ++i) {
+            lv_obj_add_flag(battery_bands_[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    ++update_count_;
+}
+
+void GuiManager::SetBatteryLevel(int filled_blocks)
+{
+    int clamped = filled_blocks;
+    if (clamped < 1) clamped = 1;
+    if (clamped > kBatteryBlockCount) clamped = kBatteryBlockCount;
+
+    if (clamped == last_battery_filled_blocks_) {
+        return;  // unchanged — same dirty-check reasoning as the rest of this class
+    }
+    last_battery_filled_blocks_ = clamped;
+
+    const lv_color_t color = BatteryTierColor(clamped);
+    const lv_color_t empty_color = lv_color_make(60, 60, 60);
+    for (int i = 0; i < kBatteryBlockCount; ++i) {
+        // i=0 is the bottom band (see the constructor's comment) —
+        // filling bottom-up means the first `clamped` *lowest* bands light
+        // up, which is exactly i < clamped here since i counts up from
+        // the bottom.
+        const bool filled = i < clamped;
+        lv_obj_set_style_bg_color(battery_bands_[i], filled ? color : empty_color, 0);
+    }
     ++update_count_;
 }
 

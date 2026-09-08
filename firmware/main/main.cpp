@@ -83,17 +83,13 @@ constexpr bool kDebugOverlayEnabled = true;
 // the buffered approach only if something *else* turns out to need
 // hiding I/O from the timing-critical window again.
 //
-// false -> true (2026-09-07): re-enabling to recollect an angle graph now
-// that the rotation feel itself is settled (gyro overshoot fix, adaptive
-// complementary filter, etc. — see gravity_timer_project_plan.md's M8/M9
-// notes) — this time checking the *numbers* line up with the good feel,
-// not just diagnosing a throughput bug. Kept deliberately separate from
-// kDebugOverlayEnabled/kLoopTimingLogEnabled (see the flag-layout note
-// just below kLoopTimingLogEnabled's declaration) rather than folding
-// into one shared flag — a clean ATT-only serial capture is the whole
-// point of a graphing session, and merging flags would spam LOOP/tap/WoM
-// status lines into the same stream.
-constexpr bool kAttitudeDebugLogEnabled = true;
+// false -> true -> false (2026-09-08): re-enabled 2026-09-07 to recollect
+// an angle graph and confirm the rotation feel's numbers looked as good
+// as they felt (they did — see gravity_timer_project_plan.md's M8/M9
+// notes, including the ±512dps gyro-range follow-up that graph itself
+// motivated). Attitude tracking itself isn't under active investigation
+// anymore, so back off — flip back to true if it needs watching again.
+constexpr bool kAttitudeDebugLogEnabled = false;
 
 // Hold BOOT (GPIO0) this long, while the app is already running, to enter
 // calibration mode. NOT checked at power-on/reset — see calibration_mode.hpp.

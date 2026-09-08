@@ -100,6 +100,21 @@ constexpr uint32_t kRingBreathWindowSec = 5;
 constexpr uint32_t kRingBreathPeriodMs = 1000;
 constexpr uint8_t kRingBreathFloorOpa = 60;
 
+// See app_controller.hpp design note 10. Asymmetric on purpose: still a
+// deliberate hold to enter (500ms — 2000ms->500ms 2026-09-08, first-hardware-
+// pass feedback that 2s felt slow now that the entry threshold itself
+// (kAzInvalidEnterThresholdG=0.7g) already does most of the work rejecting
+// accidental triggers), but essentially instant to leave (0ms — set the
+// device back down and it's back immediately, no hold needed).
+constexpr uint32_t kBatteryViewEnterMs = 500;
+constexpr uint32_t kBatteryViewExitMs = 0;
+
+// Placeholder until real ADC/voltage-LUT code exists (see design note
+// 10's "known gap" paragraph) — fixed at "middle" so the gesture and
+// rendering can be tested end-to-end on hardware before real battery data
+// is wired in. 1-indexed, matches GuiManager::SetBatteryLevel()'s range.
+constexpr int kStubBatteryFilledBlocks = 3;
+
 float FaceCenterDeg(AppController::Face face)
 {
     switch (face) {
@@ -161,6 +176,21 @@ std::unique_ptr<TimerFace> AppController::CreateFace(Face face)
 
 void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t dt_ms)
 {
+    UpdateBatteryView(attitude, dt_ms);
+    if (showing_battery_) {
+        // Underlying face keeps its own clock correct (design note 10 —
+        // nothing to save/restore on the way back out), but face
+        // switching/brightness-fade/ring/render are all skipped this tick;
+        // the battery view owns the screen instead.
+        if (current_) {
+            current_->onTick(dt_ms);
+        }
+        gui_manager_.SetBrightness(1.0f);
+        gui_manager_.SetRingOpacity(0);
+        gui_manager_.SetBatteryLevel(kStubBatteryFilledBlocks);  // TODO: real ADC reading, see design note 10
+        return;
+    }
+
     const Face quantized = QuantizeFace(attitude.screen_angle_deg);
 
     // Commit the instant quantized disagrees with the confirmed face (or
@@ -363,10 +393,46 @@ void AppController::UpdateRing()
 
 void AppController::OnTap()
 {
+    if (showing_battery_) {
+        return;  // see design note 10 — ignore taps while checking battery
+    }
     if (tap_mute_remaining_ms_ > 0) {
         return;  // see design note 6 — absorbing a flip's residual vibration
     }
     if (current_) {
         current_->onTap();
+    }
+}
+
+void AppController::UpdateBatteryView(const AttitudeEstimator::Output& attitude, uint32_t dt_ms)
+{
+    // See design note 10: battery_view_hold_ms_ counts continuous time in
+    // the state *opposite* showing_battery_'s current value, reset the
+    // instant attitude.in_valid_plane agrees with the current state
+    // again. attitude.in_valid_plane is already hysteresis-debounced at
+    // the source (AttitudeEstimator), so a single stray tick right at a
+    // threshold can't happen here in the first place.
+    if (!showing_battery_) {
+        if (!attitude.in_valid_plane) {
+            battery_view_hold_ms_ += dt_ms;
+            if (battery_view_hold_ms_ >= kBatteryViewEnterMs) {
+                showing_battery_ = true;
+                battery_view_hold_ms_ = 0;
+                gui_manager_.ShowBatteryView(true);
+            }
+        } else {
+            battery_view_hold_ms_ = 0;
+        }
+    } else {
+        if (attitude.in_valid_plane) {
+            battery_view_hold_ms_ += dt_ms;
+            if (battery_view_hold_ms_ >= kBatteryViewExitMs) {
+                showing_battery_ = false;
+                battery_view_hold_ms_ = 0;
+                gui_manager_.ShowBatteryView(false);
+            }
+        } else {
+            battery_view_hold_ms_ = 0;
+        }
     }
 }
