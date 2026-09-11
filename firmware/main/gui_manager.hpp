@@ -187,13 +187,20 @@ constexpr int32_t kRootHeightPx = 65;
 //      sensor loop entirely (a separate task/core, so root_'s redraw cost
 //      stops blocking IMU/AttitudeEstimator/AppController regardless of
 //      how expensive it stays) — neither attempted yet as of this note.
-// SetRotationDeg() takes screen_angle_deg directly — same CW-positive
-// convention as AttitudeEstimator — and negates it: LVGL's
-// transform_rotation is also CW-positive (matches its arc widget's
-// documented convention), so rotating the content by the negative of the
-// device's own physical rotation keeps it upright to the user regardless
-// of how the device is twisted in hand. Sign not yet confirmed on real
-// hardware — flip kRotationSign in the .cpp if it comes out backwards.
+// SetRotationDeg() takes screen_angle_deg directly — same convention as
+// AttitudeEstimator, which was CW-positive, flipped 2026-09-11 to
+// CCW-positive (see attitude_estimator.hpp's sign-convention history) —
+// and combines it with kRotationSign (gui_manager.cpp) to counter-rotate:
+// LVGL's transform_rotation is itself fixed CW-positive (matches its arc
+// widget's documented convention, unaffected by our own convention
+// choice), so kRotationSign exists to convert whichever convention
+// screen_angle_deg currently uses into that fixed LVGL one before negating
+// it — rotating the content by the negative of the device's own physical
+// rotation keeps it upright to the user regardless of how the device is
+// twisted in hand. Confirmed correct on real hardware both before and
+// after the 2026-09-11 flip (kRotationSign flipped in lockstep, -1 -> +1,
+// so the actual rendered rotation for any given physical orientation is
+// unchanged — only screen_angle_deg's own sign changed).
 class GuiManager {
 public:
     explicit GuiManager(LGFX& lcd);

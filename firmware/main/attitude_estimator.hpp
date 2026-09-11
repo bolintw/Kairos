@@ -100,18 +100,22 @@ public:
     };
 
     // Sign convention, confirmed on hardware with the debug overlay's
-    // gyro chart (flipped 2026-08-23 so CW is positive — was CCW=positive
-    // in the first version; underlying hardware facts below are
-    // unchanged, only the sign applied to them):
+    // gyro chart. History: CCW=positive in the very first version;
+    // flipped 2026-08-23 to CW=positive; flipped back to CCW=positive
+    // 2026-09-11 — the 08-23 flip turned out to be based on a
+    // mis-description of the intended convention, caught only once the
+    // on-screen debug angle ("Ang" in the overlay) was watched directly
+    // against physical rotation. Underlying hardware facts below are
+    // unchanged either time, only the sign applied to them:
     //   - screen upright, facing user: accel ~= (0, -1, 0)g,
     //     screen_angle_deg = 0
     //   - rotated 90 deg counter-clockwise (as seen by the user looking
-    //     at the screen): accel ~= (+1, 0, 0)g, screen_angle_deg = -90,
+    //     at the screen): accel ~= (+1, 0, 0)g, screen_angle_deg = +90,
     //     and this rotation reads as *negative* GZ (confirmed via the
     //     gyro chart; an earlier guess from raw numbers alone said GX —
     //     the chart corrected that)
-    //   - so: screen_angle_deg = atan2(-accel_g[0], -accel_g[1]) matches
-    //     both points above, and d(screen_angle_deg)/dt = +gyro_dps[2]
+    //   - so: screen_angle_deg = atan2(accel_g[0], -accel_g[1]) matches
+    //     both points above, and d(screen_angle_deg)/dt = -gyro_dps[2]
     //   - AZ is expected ~0g by construction (see class comment). Its
     //     magnitude drives Output::in_valid_plane (see above): once |AZ|
     //     crosses a threshold, Update() also stops applying the

@@ -206,10 +206,23 @@ float AccelTrustWeight(float gz_abs_dps, float dt_ms)
 // Shared by Update() and SeedInitialAngle() — same formula, see the
 // header's sign-convention comment. Takes ax/ay directly (not a Sample)
 // so Update() can pass its low-pass-filtered values.
+//
+// atan2(ax, -ay), offset ADDED (2026-09-11, was atan2(-ax,-ay) with the
+// offset SUBTRACTED — see the header's sign-convention history): this
+// exact pairing — negate only the ax argument, and add instead of
+// subtract — is deliberate, not an arbitrary equivalent rewrite. It makes
+// the new formula produce exactly the negation of the old one for every
+// input (raw_new(ax,ay) = -raw_old(ax,ay), a fixed algebraic identity),
+// which means any face_a_offset_deg already calibrated and stored in NVS
+// under the *old* convention still nulls out correctly here — no
+// recalibration needed by this sign flip alone. (calibration_mode.cpp's
+// own RawAccelAngleDeg helper, which computes what gets stored as
+// face_a_offset_deg in the first place, deliberately still uses the old
+// atan2(-ax,-ay) form for exactly this reason — see its comment.)
 float AngleFromAccel(float ax, float ay, float face_a_offset_deg)
 {
-    const float raw_accel_angle = std::atan2(-ax, -ay) * kRadToDeg;
-    return WrapDeg180(raw_accel_angle - face_a_offset_deg);
+    const float raw_accel_angle = std::atan2(ax, -ay) * kRadToDeg;
+    return WrapDeg180(raw_accel_angle + face_a_offset_deg);
 }
 
 }  // namespace
@@ -273,13 +286,15 @@ AttitudeEstimator::Output AttitudeEstimator::Update(const Sample& sample, uint32
     const float gy = filtered_gyro_dps_[1] - gyro_bias_dps_[1];
     const float gz = filtered_gyro_dps_[2] - gyro_bias_dps_[2];
 
-    // Sign flipped 2026-08-23 (was CCW=positive): CCW rotation (as seen
-    // by the user) now *decreases* screen_angle_deg, CW increases it.
-    // The underlying hardware fact is unchanged — CCW still reads as
-    // negative GZ — only which direction we call "positive" changed, so
-    // both the gyro term and the accel formula's sign flip together.
+    // Sign flipped 2026-08-23 to CW=positive, flipped back 2026-09-11 to
+    // CCW=positive (see the header's sign-convention history) — CCW
+    // rotation (as seen by the user) now *increases* screen_angle_deg, CW
+    // decreases it. The underlying hardware fact is unchanged — CCW still
+    // reads as negative GZ — only which direction we call "positive"
+    // changed, so both this gyro term and AngleFromAccel's formula flip
+    // together.
     const float angle_from_gyro =
-        WrapDeg180(angle_deg_ + gz * (static_cast<float>(dt_ms) / 1000.0f));
+        WrapDeg180(angle_deg_ - gz * (static_cast<float>(dt_ms) / 1000.0f));
 
     // Schmitt-trigger hysteresis on |AZ| — see kAzInvalidEnterThresholdG's
     // comment. in_valid_plane_ only flips when the *current* threshold for

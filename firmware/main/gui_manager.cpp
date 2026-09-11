@@ -13,9 +13,15 @@ float Clamp01(float v)
     return v;
 }
 
-// See gui_manager.hpp's rotation design note — flip this to +1.0f if the
-// overlay turns out to spin the wrong way on real hardware.
-constexpr float kRotationSign = -1.0f;
+// See gui_manager.hpp's rotation design note. -1.0f -> +1.0f (2026-09-11):
+// AttitudeEstimator's screen_angle_deg flipped from CW-positive to
+// CCW-positive (attitude_estimator.hpp/.cpp) — this needs to flip in
+// lockstep to keep counter-rotating correctly, since LVGL's own rotation
+// API is fixed CW-positive regardless of our convention. Confirmed this
+// pairing keeps root_/ring_ physically unchanged (same rendered angle for
+// any given physical orientation, only screen_angle_deg's own sign
+// changed) — see app_controller.cpp's matching FaceCenterDeg swap.
+constexpr float kRotationSign = 1.0f;
 
 // See SetRotationDeg()'s comment — a floor on how often the expensive
 // rotated redraw is allowed to fire, independent of the sensor tick rate

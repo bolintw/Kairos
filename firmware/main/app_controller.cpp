@@ -110,6 +110,19 @@ constexpr uint32_t kBatteryViewExitMs = 0;
 // is wired in. 1-indexed, matches GuiManager::SetBatteryLevel()'s range.
 constexpr int kStubBatteryFilledBlocks = 3;
 
+// 2026-09-11: screen_angle_deg flipped from CW-positive to CCW-positive
+// (attitude_estimator.hpp). First reaction was to swap A/C's numbers in
+// lockstep (-90/90 -> 90/-90) to keep every *physical* mounting
+// orientation mapped to the same face content as before the flip — but
+// the user's actual intent pins these numbers directly to content
+// (A=-90 is specifically "the 25/5 pomodoro face", not "whichever
+// physical spot used to be -90"), so that swap was reverted the same day:
+// back to -90/0/90/180 for A/B/C/D, same numbers as before the whole
+// CW/CCW change. Net effect: the angle *sign* fix is real (confirmed on
+// hardware) and which physical twist reaches which content did change as
+// a result — acceptable since face-to-enclosure mapping is still
+// provisional (see design note 1 above). B (0) and D (180) were never
+// touched either way, being self-symmetric under negation.
 float FaceCenterDeg(AppController::Face face)
 {
     switch (face) {
@@ -138,6 +151,8 @@ AppController::Face NearestFace(float screen_angle_deg)
     while (deg < 0.0f) deg += 360.0f;
     while (deg >= 360.0f) deg -= 360.0f;
 
+    // Matches FaceCenterDeg above (reverted 2026-09-11 back to its
+    // pre-CW/CCW-flip boundaries — see that function's comment).
     if (deg < 45.0f || deg >= 315.0f) return AppController::Face::kB;
     if (deg < 135.0f) return AppController::Face::kC;
     if (deg < 225.0f) return AppController::Face::kD;

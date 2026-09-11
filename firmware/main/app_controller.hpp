@@ -12,7 +12,11 @@
 // Design:
 //
 // 1. Quantize AttitudeEstimator::Output::screen_angle_deg into A/B/C/D,
-//    centered on -90/0/90/180 (A/B/C/D respectively, set 2026-08-23).
+//    centered on -90/0/90/180 (A/B/C/D respectively, set 2026-08-23; these
+//    numbers briefly swapped for A/C then reverted the same day, 2026-09-11
+//    — see FaceCenterDeg's comment in app_controller.cpp — when
+//    screen_angle_deg's CW->CCW-positive flip meant keeping these numbers
+//    fixed to their content changes which physical twist reaches each one).
 //    Physical mapping is provisional pending M10 enclosure geometry —
 //    trivial to change later. A=PomodoroFace(25,5), B=PomodoroFace(50,10),
 //    C=StopwatchFace, D=BreathFace (see CreateFace).
@@ -223,8 +227,12 @@
 //    orientation always, so on any other face its 12 o'clock pointed
 //    somewhere that wasn't actually "up" for that face's own upright
 //    content — e.g. on face A (FaceCenterDeg=-90, reached by rotating the
-//    device -90 degrees/CCW from B), the fixed reference physically
-//    landed at what would be B's own 9 o'clock. Re-snapping per face,
+//    device 90 degrees/CW from B as of 2026-09-11's CCW-positive
+//    screen_angle_deg convention — was CCW pre-flip, same -90 number both
+//    times; see FaceCenterDeg's own comment in app_controller.cpp for why
+//    the number stayed pinned to content instead of following the sign
+//    flip), the fixed reference physically landed at what would be B's
+//    own 9 o'clock. Re-snapping per face,
 //    instead of continuously tracking screen_angle_deg the way root_
 //    does, keeps this off the transform/matrix crash path (see
 //    GuiManager's class doc) while still reading correctly once a flip

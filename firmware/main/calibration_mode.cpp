@@ -71,6 +71,16 @@ void DelayWithDisplay(uint32_t total_ms)
     }
 }
 
+// Deliberately still the *old* (pre-2026-09-11) atan2(-ax,-ay) convention
+// — see attitude_estimator.cpp's AngleFromAccel comment. This function's
+// raw output is stored directly as face_a_offset_deg below (unchanged by
+// this file), and AttitudeEstimator's new formula was specifically
+// derived to still consume an offset computed this old way correctly, so
+// this stays as-is. The one caller that needs the *new* convention
+// (DelayWithDisplayAndRotation's live rotation preview, so it pairs
+// correctly with GuiManager's now-flipped kRotationSign) negates this
+// function's result at its own call site instead of this function
+// changing — see there.
 float RawAccelAngleDeg(float ax, float ay)
 {
     return std::atan2(-ax, -ay) * kRadToDeg;
@@ -94,7 +104,13 @@ void DelayWithDisplayAndRotation(uint32_t total_ms, Qmi8658& imu, GuiManager& gu
     while (esp_timer_get_time() - start_us < static_cast<int64_t>(total_ms) * 1000) {
         Qmi8658::Sample sample;
         if (imu.Read(sample)) {
-            gui.SetRotationDeg(RawAccelAngleDeg(sample.accel_g[0], sample.accel_g[1]));
+            // Negated (2026-09-11): RawAccelAngleDeg deliberately stays in
+            // the old sign convention (see its own comment) but
+            // SetRotationDeg now expects the new one, paired with
+            // GuiManager's flipped kRotationSign — the new-convention raw
+            // angle is exactly the negation of the old one for any input
+            // (see attitude_estimator.cpp's AngleFromAccel comment).
+            gui.SetRotationDeg(-RawAccelAngleDeg(sample.accel_g[0], sample.accel_g[1]));
         }
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(kUiTickMs));
@@ -306,11 +322,14 @@ void RunCalibrationMode(Qmi8658& imu, GuiManager& gui)
     for (int i = 0; i < 3; ++i) {
         data.gyro_bias_dps[i] = bias.gyro_bias_dps[i];
     }
-    // Bias-corrected before computing the rotational offset — same
-    // formula AttitudeEstimator uses for its raw accel-derived angle (see
-    // AngleFromAccel), recording it directly as the offset makes the
-    // corrected angle read 0 when the device is next resting in this same
-    // (reference) orientation.
+    // Bias-corrected before computing the rotational offset. Deliberately
+    // still RawAccelAngleDeg's old-convention formula (2026-09-11 — see
+    // its own comment), NOT a copy of AttitudeEstimator's current
+    // AngleFromAccel: recording this old-convention raw angle directly as
+    // the offset, combined with AngleFromAccel's offset-ADDED formula, is
+    // exactly what makes the corrected angle read 0 back at this same
+    // (reference) orientation — that identity is what let the sign flip
+    // avoid needing a matching change here.
     data.face_a_offset_deg = RawAccelAngleDeg(bias.ref_ax - bias.bias_x, bias.ref_ay - bias.bias_y);
 
     SaveCalibration(data);
