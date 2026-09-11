@@ -376,15 +376,31 @@ void GuiManager::SetRingProgress(float elapsed_fraction, bool growing)
         lv_arc_set_bg_angles(ring_, boundary_deg, 360);
     }
 
-    // Tick: centered on the same boundary angle, clamped so its span
-    // doesn't reach past [0, 360] — a plain clamp rather than wrapping
-    // around 0/360 leaves the tick's shape very slightly asymmetric right
-    // at the two extremes (elapsed_fraction near 0 or 1), a minor cosmetic
-    // edge case rather than something worth the extra modulo-angle logic.
+    // Tick: centered on the same boundary angle, kept in-bounds by
+    // *shifting* its span rather than clamping each edge independently
+    // (2026-09-11, fixed after hardware feedback: near elapsed_fraction≈0,
+    // a phase's tick is visible from the instant it starts running — see
+    // AppController::UpdateRing() — right where boundary_deg≈0 sits inside
+    // half the tick's own span of 0. A plain per-edge clamp there just
+    // dropped the tick_start<0 portion entirely, rendering only the
+    // boundary_deg..boundary_deg+halfSpan half — a tick reading roughly
+    // half as thick as normal for the first few seconds of every phase,
+    // "recovering" full thickness once boundary_deg grew past
+    // kRingTickHalfSpanDeg. Shifting the *whole* span by however much it
+    // overhung [0, 360] instead keeps its full 2*kRingTickHalfSpanDeg
+    // width at every boundary angle, at the cost of the tick's center
+    // drifting up to kRingTickHalfSpanDeg off the true boundary right at
+    // the two extremes — a couple degrees' position error reads far less
+    // wrong than a visibly thinner line.
     float tick_start = static_cast<float>(boundary_deg) - kRingTickHalfSpanDeg;
     float tick_end = static_cast<float>(boundary_deg) + kRingTickHalfSpanDeg;
-    if (tick_start < 0.0f) tick_start = 0.0f;
-    if (tick_end > 360.0f) tick_end = 360.0f;
+    if (tick_start < 0.0f) {
+        tick_end -= tick_start;  // shift right by the overhang, preserving width
+        tick_start = 0.0f;
+    } else if (tick_end > 360.0f) {
+        tick_start -= (tick_end - 360.0f);  // shift left by the overhang, preserving width
+        tick_end = 360.0f;
+    }
     lv_arc_set_bg_angles(ring_tick_, static_cast<uint16_t>(tick_start), static_cast<uint16_t>(tick_end));
 
     ++update_count_;

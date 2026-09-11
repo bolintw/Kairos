@@ -7,13 +7,11 @@
 #include "stopwatch_face.hpp"
 
 namespace {
-// 25/5 min -> 1min/30s (2026-09-09, temporary) — real values are a pain
-// to sit through while testing the new countdown ring's erosion/tick
-// behavior on hardware; face B (50/10 min) is left at its real duration
-// as the "actually usable" Pomodoro option in the meantime. Revert once
-// the ring itself is settled.
-constexpr uint32_t kFocusMsA = 1 * 60 * 1000;
-constexpr uint32_t kBreakMsA = 30 * 1000;
+// 25/5 min -> 1min/30s (2026-09-09, temporary, for testing the new
+// countdown ring's erosion/tick behavior on hardware) -> back to 25/5 min
+// (2026-09-11, ring design settled and committed).
+constexpr uint32_t kFocusMsA = 25 * 60 * 1000;
+constexpr uint32_t kBreakMsA = 5 * 60 * 1000;
 constexpr uint32_t kFocusMsB = 50 * 60 * 1000;
 constexpr uint32_t kBreakMsB = 10 * 60 * 1000;
 

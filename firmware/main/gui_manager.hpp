@@ -90,17 +90,26 @@ constexpr uint8_t kRingTrackOpa = 70;  // ~27% of full — starting guess
 // it reaches, roughly a fifth of kRingRadiusPx) shares the main ring's own
 // outer edge (kRingTickRadiusPx == kRingRadiusPx) and reaches well past
 // the ring's own inner edge, into the empty center, so it reads as poking
-// inward rather than just matching the ring's own band. kRingTickHalfSpanDeg
-// is derived from kRingWidthPx so the tick's *tangential* extent at that
-// radius works out to the same stroke thickness as the ring itself
-// ("線條粗度跟外圈相等", confirmed correct alongside the shape/color above)
-// — a fixed literal half-span, sized by eye, wouldn't automatically match
-// if kRingWidthPx ever changes. arc-length = radius * angle(rad), so
-// half_span_rad = (kRingWidthPx/2) / kRingRadiusPx; converted to degrees
-// below.
+// inward rather than just matching the ring's own band.
+//
+// kRingTickHalfSpanDeg controls the tick's *tangential* extent (its own
+// visual thickness) at that radius — originally derived algebraically
+// from kRingWidthPx so the two would come out numerically equal
+// ("線條粗度跟外圈相等"), but on real hardware the tick still read visibly
+// thinner than the ring at that equal value (7px each) — same math, but
+// this is a narrow-angular-span arc segment rather than the ring's own
+// full sweep, and apparently reads thinner regardless of the area being
+// equal. Decoupled into its own independently-tunable kRingTickThicknessPx
+// (2026-09-11) rather than trying to derive a "corrected" width from
+// kRingWidthPx — the user wants to try 8 or 9 directly against the ring's
+// own 7 and see which reads as matching, not have this recompute a value
+// that already didn't look right once. arc-length = radius * angle(rad),
+// so half_span_rad = (kRingTickThicknessPx/2) / kRingRadiusPx; converted
+// to degrees below.
 constexpr int32_t kRingTickRadiusPx = kRingRadiusPx;
 constexpr int32_t kRingTickWidthPx = kRingRadiusPx / 5;
-constexpr float kRingTickHalfSpanDeg = (kRingWidthPx * 180.0f) / (2.0f * kRingRadiusPx * 3.14159265f);
+constexpr int32_t kRingTickThicknessPx = 9;  // try 8 or 9 against the ring's own 7px — see above
+constexpr float kRingTickHalfSpanDeg = (kRingTickThicknessPx * 180.0f) / (2.0f * kRingRadiusPx * 3.14159265f);
 
 // Size of root_, the rotating container around the primary label — NOT
 // the full panel. See the design note below for why: a full 240x240
