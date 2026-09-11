@@ -325,41 +325,41 @@ public:
     // allowed to happen.
     void SetRotationDeg(float screen_angle_deg);
 
-    // Battery-check gesture display (2026-09-08, revised same day: pie
-    // wedges tried first, replaced once the user described a different
-    // picture — the full round panel filled with color, then cut by 4
-    // horizontal lines into 5 stacked horizontal bands, not radial
-    // slices) — see AppController's showing_battery_ design note.
-    // kBatteryBlockCount full-width rectangles stacked vertically, each
-    // panel_size/kBatteryBlockCount tall with a thin gap between
-    // neighbors; the physical round bezel does the circular clipping for
-    // free (LVGL just draws a full-width rectangle per band — no need to
-    // compute the chord width at each height, the glass already only
-    // shows the round portion of whatever's drawn). Plain (non-rotating)
-    // children of lv_screen_active(), same reasoning as ring_:
-    // screen_angle_deg isn't trustworthy while the device is held out of
-    // the tracked plane (that's the gesture itself), so this deliberately
-    // doesn't live under root_. Fills bottom-up (band 0 = bottom band),
-    // matching the usual "liquid level" reading of a battery gauge.
+    // Battery-check gesture display — see AppController's showing_battery_
+    // design note. History: pie wedges first (2026-09-08), replaced same
+    // day by 5 full-width horizontal bands filling the whole round panel
+    // bottom-up (a "liquid level" gauge), replaced again 2026-09-11 by
+    // this version — a literal horizontal battery icon (gray outline +
+    // terminal nub, kBatteryBlockCount vertical segments inside filling
+    // left-to-right) after the user found a reference image of that
+    // style and asked for it directly. Geometry constants
+    // (kBatteryIconWidthPx etc.) live in gui_manager.cpp's anonymous
+    // namespace, not here, since nothing outside that file needs them —
+    // kBatteryBlockCount stays public only because it sizes
+    // battery_segments_ below. Plain (non-rotating) children of
+    // lv_screen_active(), same reasoning as ring_: screen_angle_deg isn't
+    // trustworthy while the device is held out of the tracked plane
+    // (that's the gesture itself), so this deliberately doesn't live
+    // under root_.
     static constexpr int kBatteryBlockCount = 5;
 
     // Shows or hides the whole battery view: hides root_ (the digits) and
-    // ring_ and shows the bands, or the reverse. The hidden face's own
-    // state keeps updating underneath either way (AppController still
+    // ring_ and shows the battery icon, or the reverse. The hidden face's
+    // own state keeps updating underneath either way (AppController still
     // calls onTick()) — this only controls what's currently drawn.
     // Idempotent/dirty-checked, safe to call every tick if that's ever
     // convenient.
     void ShowBatteryView(bool show);
 
-    // filled_blocks: how many of kBatteryBlockCount bands to fill,
-    // bottom-up, clamped to [1, kBatteryBlockCount] — always at least one
-    // band lit, since "the display is currently blank" and "battery reads
-    // near-empty" shouldn't look identical. Every band is always drawn
-    // with *some* fill (dim gray if not yet reached) so the circle always
-    // reads as fully covered in color, per the class comment above. Picks
-    // one of kBatteryBlockCount fixed colors (red at 1 -> green at
-    // kBatteryBlockCount) applied to every filled band alike — a single
-    // "how much charge, at a glance" read, not a per-band gradient.
+    // filled_blocks: how many of kBatteryBlockCount segments to fill,
+    // left-to-right, clamped to [1, kBatteryBlockCount] — always at least
+    // one segment lit, since "the display is currently blank" and
+    // "battery reads near-empty" shouldn't look identical. Every segment
+    // is always drawn with *some* fill (dim gray if not yet reached).
+    // Picks one of kBatteryBlockCount fixed colors (red at 1 -> green at
+    // kBatteryBlockCount) applied to every filled segment alike — a
+    // single "how much charge, at a glance" read, not a per-segment
+    // gradient (same BatteryTierColor() as the previous band design).
     void SetBatteryLevel(int filled_blocks);
 
     // Recovers the display after RunIdleSleep() (M9, sleep_mode.hpp):
@@ -429,5 +429,7 @@ private:
     lv_obj_t* ring_track_;
     lv_obj_t* ring_;
     lv_obj_t* ring_tick_;
-    lv_obj_t* battery_bands_[kBatteryBlockCount];
+    lv_obj_t* battery_outline_;
+    lv_obj_t* battery_nub_;
+    lv_obj_t* battery_segments_[kBatteryBlockCount];
 };

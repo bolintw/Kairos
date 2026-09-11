@@ -24,23 +24,45 @@ constexpr float kRotationSign = -1.0f;
 // sensor rate this is decoupling the redraw cost from.
 constexpr int64_t kRotationUpdateMinIntervalUs = 33 * 1000;
 
-// Battery band geometry (2026-09-08) — see SetBatteryLevel()'s header
-// comment. kBatteryBlockCount full-width rectangles stacked vertically to
-// exactly cover the panel height, each kPanelSizePx/kBatteryBlockCount
-// tall minus kBatteryBandGapPx split across its top/bottom edges so
-// adjacent bands show a thin dark seam between them (the "cut" lines) —
-// no per-height chord-width math needed, the round bezel already clips
-// whatever's drawn to the visible circle.
-// 3 -> 14 -> 10 (2026-09-08) — 14 was a bit too thick once the corner
-// radius settled down to a gentle fillet (kBandCornerRadiusPx in the
-// constructor) instead of the earlier pill-cap shape; landed on 10.
-constexpr int32_t kBatteryBandGapPx = 10;
+// Battery icon geometry (2026-09-11, replacing the full-panel horizontal
+// band design — see kBatteryBlockCount's header comment) — a literal
+// horizontal battery icon per the user's reference image: a gray outline
+// rect with a small terminal nub on the right, kBatteryBlockCount vertical
+// segments inside filling left-to-right. Centered on the panel.
+constexpr int32_t kBatteryIconWidthPx = 150;
+constexpr int32_t kBatteryIconHeightPx = 70;
+constexpr int32_t kBatteryIconXPx = (kPanelSizePx - kBatteryIconWidthPx) / 2;
+constexpr int32_t kBatteryIconYPx = (kPanelSizePx - kBatteryIconHeightPx) / 2;
+// "線條大概抓個5粗細" — the outline's own border stroke.
+constexpr int32_t kBatteryBorderWidthPx = 5;
+constexpr int32_t kBatteryCornerRadiusPx = 10;
+// Terminal nub — the small bump on the right edge every battery icon
+// has, same reference image. A plain filled rect in the same gray as the
+// outline border, not its own border — small enough that the distinction
+// wouldn't read at this size.
+constexpr int32_t kBatteryNubWidthPx = 10;
+constexpr int32_t kBatteryNubHeightPx = 28;
+// Segment layout: inset from the outline's own border by kBatteryPadPx on
+// every side, then kBatteryBlockCount equal-width bars with
+// kBatterySegGapPx between neighbors, filling the inset area's full
+// height.
+constexpr int32_t kBatteryPadPx = 6;
+constexpr int32_t kBatterySegGapPx = 5;
+constexpr int32_t kBatterySegAreaXPx = kBatteryIconXPx + kBatteryBorderWidthPx + kBatteryPadPx;
+constexpr int32_t kBatterySegAreaYPx = kBatteryIconYPx + kBatteryBorderWidthPx + kBatteryPadPx;
+constexpr int32_t kBatterySegAreaWidthPx = kBatteryIconWidthPx - 2 * (kBatteryBorderWidthPx + kBatteryPadPx);
+constexpr int32_t kBatterySegAreaHeightPx = kBatteryIconHeightPx - 2 * (kBatteryBorderWidthPx + kBatteryPadPx);
+constexpr int32_t kBatterySegWidthPx =
+    (kBatterySegAreaWidthPx - (GuiManager::kBatteryBlockCount - 1) * kBatterySegGapPx) / GuiManager::kBatteryBlockCount;
+constexpr int32_t kBatterySegCornerRadiusPx = 3;
+constexpr lv_color_t kBatteryGray = LV_COLOR_MAKE(140, 140, 140);
+constexpr lv_color_t kBatteryEmptyGray = LV_COLOR_MAKE(60, 60, 60);
 
-// One fixed color per fill count, red (1 band) -> green
-// (GuiManager::kBatteryBlockCount bands) — see SetBatteryLevel()'s
+// One fixed color per fill count, red (1 segment) -> green
+// (GuiManager::kBatteryBlockCount segments) — see SetBatteryLevel()'s
 // header comment for why this is a single accent color per level rather
-// than a per-band gradient. Starting palette, not tuned against the
-// real panel yet.
+// than a per-segment gradient. Starting palette, not tuned against the
+// real panel yet. Unchanged by the 2026-09-11 band->icon redesign.
 lv_color_t BatteryTierColor(int filled_blocks)
 {
     switch (filled_blocks) {
@@ -185,61 +207,56 @@ GuiManager::GuiManager(LGFX& lcd)
     lv_obj_remove_flag(ring_tick_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(ring_tick_, LV_OBJ_FLAG_HIDDEN);
 
-    // Battery bands (2026-09-08) — see the header's kBatteryBlockCount
-    // comment. Plain children of lv_screen_active(), same non-rotating
-    // treatment as ring_ above. Hidden by default; ShowBatteryView(true)
-    // reveals them. Each starts as an "empty" dim band — SetBatteryLevel()
-    // fills in the actual state before the view is ever shown to a user
+    // Battery icon (2026-09-11, replacing the full-panel band design — see
+    // the header's kBatteryBlockCount comment for the history). Plain
+    // children of lv_screen_active(), same non-rotating treatment as ring_
+    // above. Hidden by default; ShowBatteryView(true) reveals them.
+    // battery_segments_ start as "empty" dim bars — SetBatteryLevel() fills
+    // in the actual state before the view is ever shown to a user
     // (AppController calls it every tick while showing_battery_ is true).
-    // Plain lv_obj rectangles, not a special widget: a full-width bar is
-    // exactly what lv_obj_create + a bg color already does, no arc/shape
-    // API needed once the shape wanted is horizontal stripes rather than
-    // radial slices.
-    {
-        // Non-uniform band heights (2026-09-08) — equal fifths read too
-        // mechanical; the user wants the middle band biggest, tapering
-        // toward the top/bottom, with corners just gently filleted rather
-        // than the full pill-cap shape tried first (kBandCornerRadiusPx
-        // below, not height/2 anymore). Weights are relative, indexed the
-        // same as battery_bands_ (i=0 bottom/fills-first .. top),
-        // symmetric around the middle (index 2) band. Boundaries computed
-        // via a running *cumulative* weight->pixel conversion, each
-        // rounded independently only at the cumulative point — not each
-        // band's height rounded on its own — so the 5 heights still sum to
-        // exactly kPanelSizePx with no stray 1px gap or overlap from
-        // independent rounding error.
-        constexpr float kBatteryBandWeights[kBatteryBlockCount] = {1.0f, 1.35f, 1.7f, 1.35f, 1.0f};
-        float total_weight = 0.0f;
-        for (float w : kBatteryBandWeights) total_weight += w;
 
-        int32_t cum_height_px[kBatteryBlockCount + 1];
-        cum_height_px[0] = 0;
-        float cum_weight = 0.0f;
-        for (int i = 0; i < kBatteryBlockCount; ++i) {
-            cum_weight += kBatteryBandWeights[i];
-            cum_height_px[i + 1] = static_cast<int32_t>(kPanelSizePx * cum_weight / total_weight + 0.5f);
-        }
-        cum_height_px[kBatteryBlockCount] = kPanelSizePx;  // force exact total, absorb float rounding drift
+    // Outline: border only, no fill — lv_obj_create's default bg would
+    // otherwise show through as a solid gray rectangle behind the segments.
+    battery_outline_ = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(battery_outline_);
+    lv_obj_set_size(battery_outline_, kBatteryIconWidthPx, kBatteryIconHeightPx);
+    lv_obj_set_pos(battery_outline_, kBatteryIconXPx, kBatteryIconYPx);
+    lv_obj_set_style_radius(battery_outline_, kBatteryCornerRadiusPx, 0);
+    lv_obj_set_style_bg_opa(battery_outline_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(battery_outline_, kBatteryBorderWidthPx, 0);
+    lv_obj_set_style_border_color(battery_outline_, kBatteryGray, 0);
+    lv_obj_set_style_border_opa(battery_outline_, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(battery_outline_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(battery_outline_, LV_OBJ_FLAG_HIDDEN);
 
-        constexpr int32_t kBandCornerRadiusPx = 10;
-        for (int i = 0; i < kBatteryBlockCount; ++i) {
-            // i=0 is the bottom band (see header comment — fills
-            // bottom-up), so its pixel range is the last slot counting
-            // down from the panel's bottom edge.
-            const int32_t band_height_px = cum_height_px[i + 1] - cum_height_px[i];
-            const int32_t y_top = kPanelSizePx - cum_height_px[i + 1];
-            const int32_t draw_height_px = band_height_px - kBatteryBandGapPx;
-            lv_obj_t* band = lv_obj_create(lv_screen_active());
-            lv_obj_remove_style_all(band);
-            lv_obj_set_size(band, kPanelSizePx, draw_height_px);
-            lv_obj_set_pos(band, 0, y_top + kBatteryBandGapPx / 2);
-            lv_obj_set_style_radius(band, kBandCornerRadiusPx, 0);
-            lv_obj_set_style_bg_opa(band, LV_OPA_COVER, 0);
-            lv_obj_set_style_bg_color(band, lv_color_make(60, 60, 60), 0);  // dim/"empty" default
-            lv_obj_remove_flag(band, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_flag(band, LV_OBJ_FLAG_HIDDEN);
-            battery_bands_[i] = band;
-        }
+    // Terminal nub — the small bump every battery icon has on its "+" end
+    // (see kBatteryNubWidthPx's comment). A plain filled rect, same gray
+    // as the outline border.
+    battery_nub_ = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(battery_nub_);
+    lv_obj_set_size(battery_nub_, kBatteryNubWidthPx, kBatteryNubHeightPx);
+    lv_obj_set_pos(battery_nub_, kBatteryIconXPx + kBatteryIconWidthPx,
+                    kBatteryIconYPx + (kBatteryIconHeightPx - kBatteryNubHeightPx) / 2);
+    lv_obj_set_style_radius(battery_nub_, 3, 0);
+    lv_obj_set_style_bg_opa(battery_nub_, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(battery_nub_, kBatteryGray, 0);
+    lv_obj_remove_flag(battery_nub_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(battery_nub_, LV_OBJ_FLAG_HIDDEN);
+
+    // Segments: kBatteryBlockCount equal-width bars, left-to-right, inset
+    // from the outline's border by kBatteryPadPx — see the geometry
+    // constants above.
+    for (int i = 0; i < kBatteryBlockCount; ++i) {
+        lv_obj_t* seg = lv_obj_create(lv_screen_active());
+        lv_obj_remove_style_all(seg);
+        lv_obj_set_size(seg, kBatterySegWidthPx, kBatterySegAreaHeightPx);
+        lv_obj_set_pos(seg, kBatterySegAreaXPx + i * (kBatterySegWidthPx + kBatterySegGapPx), kBatterySegAreaYPx);
+        lv_obj_set_style_radius(seg, kBatterySegCornerRadiusPx, 0);
+        lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(seg, kBatteryEmptyGray, 0);  // dim/"empty" default
+        lv_obj_remove_flag(seg, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(seg, LV_OBJ_FLAG_HIDDEN);
+        battery_segments_[i] = seg;
     }
 }
 
@@ -450,8 +467,10 @@ void GuiManager::ShowBatteryView(bool show)
         // closes (see the `else` branch below) isn't skipped by its own
         // dirty-check for looking like a no-op change.
         SetRingVisible(false);
+        lv_obj_clear_flag(battery_outline_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(battery_nub_, LV_OBJ_FLAG_HIDDEN);
         for (int i = 0; i < kBatteryBlockCount; ++i) {
-            lv_obj_clear_flag(battery_bands_[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(battery_segments_[i], LV_OBJ_FLAG_HIDDEN);
         }
     } else {
         lv_obj_clear_flag(root_, LV_OBJ_FLAG_HIDDEN);
@@ -461,8 +480,10 @@ void GuiManager::ShowBatteryView(bool show)
         // SetRingVisible() with whatever's actually correct for the
         // current face; unhiding unconditionally here risked a one-tick
         // flash of stale content before that correction landed.
+        lv_obj_add_flag(battery_outline_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(battery_nub_, LV_OBJ_FLAG_HIDDEN);
         for (int i = 0; i < kBatteryBlockCount; ++i) {
-            lv_obj_add_flag(battery_bands_[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(battery_segments_[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
     ++update_count_;
@@ -480,14 +501,10 @@ void GuiManager::SetBatteryLevel(int filled_blocks)
     last_battery_filled_blocks_ = clamped;
 
     const lv_color_t color = BatteryTierColor(clamped);
-    const lv_color_t empty_color = lv_color_make(60, 60, 60);
     for (int i = 0; i < kBatteryBlockCount; ++i) {
-        // i=0 is the bottom band (see the constructor's comment) —
-        // filling bottom-up means the first `clamped` *lowest* bands light
-        // up, which is exactly i < clamped here since i counts up from
-        // the bottom.
+        // Fills left-to-right: the first `clamped` segments light up.
         const bool filled = i < clamped;
-        lv_obj_set_style_bg_color(battery_bands_[i], filled ? color : empty_color, 0);
+        lv_obj_set_style_bg_color(battery_segments_[i], filled ? color : kBatteryEmptyGray, 0);
     }
     ++update_count_;
 }
