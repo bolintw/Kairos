@@ -161,15 +161,41 @@ constexpr uint8_t kWomBlankingSamples = 63;
 // single physical tap only ever registers on whichever detector is
 // active at that instant (WoM here, since the tap engine isn't running
 // during light sleep), so this window doesn't catch the *same* tap's
-// tail end — it waits for a genuinely separate, second tap. Landed on
-// 500ms (2026-09-07, was 1000ms) after hands-on testing: long enough for
-// a deliberate two-tap gesture's natural rhythm, short enough to feel
-// like one motion rather than two disconnected ones — not yet re-tested
-// against the finished enclosure/battery, may still move. kWomConfirmPollMs
-// matches the poll cadence already used elsewhere in this same function's
-// WoM-entry discard loop.
-constexpr int kWomConfirmWindowMs = 500;
+// tail end — it waits for a genuinely separate, second tap. 500ms
+// (2026-09-07, was 1000ms) was landed on after hands-on bare-board
+// testing, flagged then as "not yet re-tested against the finished
+// enclosure/battery, may still move" — it did: 2026-09-11, inside the
+// enclosure, the user reported needing ~4 taps instead of 2 despite using
+// the same tapping method that still reliably registers as a normal
+// pause/resume tap during regular operation (ruling out the tap engine's
+// own thresholds, kTapPeakMagThr/kTapUdmThr, as the cause — those are
+// clearly still sensitive enough). Widened to 1500ms as the first thing
+// to try, on the hypothesis that the window itself just wasn't long
+// enough for a natural two-tap rhythm. Confirmed correct on hardware the
+// same day, both bare-board and (the real test) inside the finished
+// enclosure — two taps wake it reliably again, at a force that still
+// doesn't feel accident-prone. kWomConfirmLatencyLogEnabled below was
+// added alongside this to check a competing hypothesis (slow
+// WoM-to-tap-engine transition) — it measured only ~13.45ms on real
+// hardware, ruling that out; the window length was the whole story.
+// kWomConfirmPollMs matches the poll cadence already used elsewhere in
+// this same function's WoM-entry discard loop.
+constexpr int kWomConfirmWindowMs = 1500;
 constexpr int kWomConfirmPollMs = 20;
+
+// Measures and logs the real elapsed time from RunIdleSleep() returning
+// (a WoM trigger confirmed) to the confirm-window poll loop actually
+// starting — i.e. the cost of ExitWakeOnMotion()+ConfigureTap()+the
+// spurious-latch discard, all real I2C command handshakes
+// (WriteCommandAndWait() in qmi8658.hpp polls a status bit rather than
+// being instant). Added 2026-09-11 to test whether this transition was a
+// meaningful fraction of the confirm window above, instead of guessing —
+// measured ~13.45ms on real hardware, small enough to rule out as the
+// cause of the enclosure wake-reliability issue (see
+// kWomConfirmWindowMs's comment for what the actual cause turned out to
+// be). Left enabled: cheap, and worth keeping visible if this ever
+// changes on different hardware.
+constexpr bool kWomConfirmLatencyLogEnabled = true;
 
 static LGFX lcd;
 // Two buffers now (2026-09-06, was one) — see lvgl_flush_cb()'s
@@ -755,6 +781,7 @@ extern "C" void app_main(void)
                             vTaskDelay(pdMS_TO_TICKS(20));
                         }
                         RunIdleSleep(imu);
+                        const int64_t wom_confirmed_us = esp_timer_get_time();
                         imu.ExitWakeOnMotion();
                         // ExitWakeOnMotion() deliberately leaves CTRL7
                         // disabled (see its own comment) — ConfigureTap()
@@ -770,6 +797,10 @@ extern "C" void app_main(void)
                         // confirmation poll below isn't immediately misread
                         // as a tap that just happened.
                         (void)imu.PollTapEvent();
+                        if (kWomConfirmLatencyLogEnabled) {
+                            printf("WOM_CONFIRM_LATENCY,us=%lld\n",
+                                   static_cast<long long>(esp_timer_get_time() - wom_confirmed_us));
+                        }
 
                         // Confirmation window — screen still off. Real
                         // sensor polling here, not light sleep: this only
