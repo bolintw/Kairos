@@ -104,11 +104,23 @@ constexpr uint32_t kRingCountUpPeriodMs = 3600u * 1000u;
 constexpr uint32_t kBatteryViewEnterMs = 500;
 constexpr uint32_t kBatteryViewExitMs = 0;
 
-// Placeholder until real ADC/voltage-LUT code exists (see design note
-// 10's "known gap" paragraph) — fixed at "middle" so the gesture and
-// rendering can be tested end-to-end on hardware before real battery data
-// is wired in. 1-indexed, matches GuiManager::SetBatteryLevel()'s range.
-constexpr int kStubBatteryFilledBlocks = 3;
+// LiPo usable range (gravity_timer_project_plan.md's M9 notes — 1S LiPo,
+// full ~4.2V, discharge floor ~3.0V) — see design note 10 for why this is
+// a plain linear split, not a discharge-curve LUT.
+constexpr float kBatteryEmptyV = 3.0f;
+constexpr float kBatteryFullV = 4.2f;
+
+// 1-indexed, matches GuiManager::SetBatteryLevel()'s range — clamped
+// there too, but clamping here as well keeps this function's own output
+// meaningful in isolation (e.g. if ever logged/tested directly).
+int BatteryVoltageToFilledBlocks(float voltage_v)
+{
+    float fraction = (voltage_v - kBatteryEmptyV) / (kBatteryFullV - kBatteryEmptyV);
+    if (fraction < 0.0f) fraction = 0.0f;
+    if (fraction > 1.0f) fraction = 1.0f;
+    const int blocks = 1 + static_cast<int>(fraction * (GuiManager::kBatteryBlockCount - 1) + 0.5f);
+    return blocks;
+}
 
 // 2026-09-11: screen_angle_deg flipped from CW-positive to CCW-positive
 // (attitude_estimator.hpp). First reaction was to swap A/C's numbers in
@@ -197,7 +209,7 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
         }
         gui_manager_.SetBrightness(1.0f);
         gui_manager_.SetRingVisible(false);
-        gui_manager_.SetBatteryLevel(kStubBatteryFilledBlocks);  // TODO: real ADC reading, see design note 10
+        gui_manager_.SetBatteryLevel(BatteryVoltageToFilledBlocks(battery_voltage_v_));
         return;
     }
 

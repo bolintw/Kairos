@@ -12,6 +12,7 @@
 
 #include "app_controller.hpp"
 #include "attitude_estimator.hpp"
+#include "battery_monitor.hpp"
 #include "calibration_mode.hpp"
 #include "sleep_mode.hpp"
 #include "gui_manager.hpp"
@@ -49,6 +50,12 @@ constexpr int kDrawBufRows = 60;
 // old 30ms rate. Worth re-checking the settle "feel" on hardware after
 // this change — may want to nudge alpha up to compensate.
 constexpr int64_t kSensorUpdatePeriodUs = 1000000 / 120;  // ~120Hz
+
+// A voltage reading has no reason to be as fresh as attitude — the
+// battery doesn't change meaningfully within a second, and
+// BatteryMonitor::ReadVoltage() already blocks for kNumSamples (32) raw
+// ADC reads per call, no benefit to calling it any more often than this.
+constexpr int64_t kBatteryReadPeriodUs = 1000000;  // 1Hz
 
 // Flip to false to hide the debug overlay entirely (angle/taps/is_moving
 // label at the top) without deleting the code — flip back on when
@@ -483,6 +490,9 @@ extern "C" void app_main(void)
     // M3/M4 debug overlay: raw accel/gyro readout plus tap count.
     static Qmi8658 imu(GPIO_NUM_6, GPIO_NUM_7);
 
+    // Design note 10's battery-check gesture — see battery_monitor.hpp.
+    static BatteryMonitor battery_monitor;
+
     // M4 starting point, not a finished tune — adjust these while watching
     // the tap count below and re-flashing. Windows are ported from
     // SensorLib's deprecated tap example (peak_window=20, tap_window=50,
@@ -529,6 +539,8 @@ extern "C" void app_main(void)
 
     int64_t next_sensor_update_us = 0;
     int64_t last_sensor_update_us = esp_timer_get_time();
+    int64_t next_battery_read_us = 0;
+    float last_battery_voltage_v = 0.0f;  // shown in the debug overlay below — 0 until the first real read
     int64_t boot_button_press_start_us = 0;
     int tap_count = 0;
     // Rendering knob 1/4 (2026-09-06): antialiasing off while actively
@@ -829,10 +841,30 @@ extern "C" void app_main(void)
 
                 if (label) {
                     const FixedParts angle = SplitFixed(RoundToFixed(attitude.screen_angle_deg, 10), 10);
-                    lv_label_set_text_fmt(label, "Ang %c%d.%01d  Taps %d\nMv%d  FPS%u",
-                        angle.sign, angle.whole, angle.frac,
-                        tap_count, attitude.is_moving ? 1 : 0,
-                        static_cast<unsigned int>(fps_display));
+                    // 2 decimal places (scale=100), not 1 like angle above
+                    // — 0.1V differences matter a lot on a LiPo's curve,
+                    // 0.1 degree doesn't matter at all for a hand-rotated
+                    // angle. Always positive in practice, so no sign
+                    // prefix (unlike angle, which legitimately needs one).
+                    const FixedParts batt = SplitFixed(RoundToFixed(last_battery_voltage_v, 100), 100);
+                    // Split to 3 short lines, not 2 longer ones (2026-09-11,
+                    // after the battery diagnostics made line 2 long enough
+                    // to run past the round glass's visible width and get
+                    // clipped) — the panel is round, not square, so the
+                    // usable horizontal room at a fixed y shrinks the
+                    // further a line sits from vertical center; this label
+                    // is anchored near the top (LV_ALIGN_TOP_MID, y=30
+                    // below), the narrowest part, so each line needs to
+                    // stay short regardless of how many lines there are.
+                    // R%d%c: last averaged raw ADC count plus a C/U flag
+                    // for whether BatteryMonitor's calibration scheme is
+                    // active (see BatteryMonitor::ReadVoltage()'s comment)
+                    // — kept short ("R" not "Raw") for the same reason.
+                    lv_label_set_text_fmt(label, "Ang %c%d.%01d Taps%d\nMv%d FPS%u\nBat%d.%02dV R%d%c",
+                        angle.sign, angle.whole, angle.frac, tap_count,
+                        attitude.is_moving ? 1 : 0, static_cast<unsigned int>(fps_display),
+                        batt.whole, batt.frac,
+                        battery_monitor.LastRawAverage(), battery_monitor.IsCalibrated() ? 'C' : 'U');
                 }
             } else if (label) {
                 lv_label_set_text(label, "IMU read failed");
@@ -840,6 +872,12 @@ extern "C" void app_main(void)
             next_sensor_update_us = now_us + kSensorUpdatePeriodUs;
         }
         sensor_block_accum_us += esp_timer_get_time() - now_us;
+
+        if (now_us >= next_battery_read_us) {
+            last_battery_voltage_v = battery_monitor.ReadVoltage();
+            app_controller.SetBatteryVoltage(last_battery_voltage_v);
+            next_battery_read_us = now_us + kBatteryReadPeriodUs;
+        }
 
         const int64_t lvgl_start_us = esp_timer_get_time();
         lv_timer_handler();

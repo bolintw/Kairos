@@ -385,17 +385,29 @@
 //     returning to normal comparatively easy once you set the device back
 //     down.
 //
-//     Known gap, not hidden: while showing_battery_, idle-sleep's own
-//     countdown (design note 9) is untouched — it only ever advances
+//     Battery level (2026-09-11): real ADC reading, not a stub anymore —
+//     main.cpp owns a BatteryMonitor (battery_monitor.hpp, GPIO1/ADC1_CH0,
+//     see hardware_pinout.md's "Battery ADC" row) and calls
+//     SetBatteryVoltage() on its own slow cadence (kBatteryReadPeriodUs,
+//     not every sensor tick — a voltage reading has no reason to be as
+//     fresh as attitude). BatteryVoltageToFilledBlocks() (app_controller.cpp)
+//     does the actual voltage->gauge-level mapping: a plain linear split
+//     of the LiPo's 3.0-4.2V usable range (gravity_timer_project_plan.md's
+//     own numbers) across the 5 blocks — a real LiPo's discharge curve is
+//     nonlinear (flatter in the middle, steeper at both ends), so this
+//     reads a bit optimistic through the flat middle stretch and a bit
+//     pessimistic right at the ends; good enough for an at-a-glance gauge,
+//     not treated as a lab-accurate percentage anywhere else.
+//
+//     Known gap, still not hidden: while showing_battery_, idle-sleep's
+//     own countdown (design note 9) is untouched — it only ever advances
 //     while the underlying face reports !is_running anyway, so checking
 //     the battery while a timer is actively running never idle-sleeps
-//     regardless. The plan-doc's low-battery-safety-net design calls for
-//     "stays lit while charging, sleeps anyway if not" — not implemented
-//     yet, since that needs a real voltage-trend read over time (no STAT
-//     pin wired to a GPIO on this board) that doesn't exist until the ADC
-//     side of this feature is built; revisit once it is. Battery level
-//     itself is a stub for the same reason — see kStubBatteryFilledBlocks
-//     in app_controller.cpp.
+//     regardless. The plan-doc's low-battery-safety-net design (forced
+//     "please charge" screen, then forced deep sleep below a lower
+//     threshold, no tap/wake accepted) still isn't implemented — now that
+//     a real voltage reading exists it's no longer blocked on the ADC
+//     side, just not built yet; revisit next.
 //
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
@@ -427,6 +439,13 @@ public:
     // to catch up.
     void NotifyWokeFromIdleSleep();
 
+    // Caches the latest real battery voltage (main.cpp reads
+    // BatteryMonitor on its own slow cadence, not every sensor tick — see
+    // main.cpp's kBatteryReadPeriodUs) for UpdateBatteryView()/Update() to
+    // convert into a gauge level next time the battery view actually
+    // renders. Replaces kStubBatteryFilledBlocks — see design note 10.
+    void SetBatteryVoltage(float voltage_v) { battery_voltage_v_ = voltage_v; }
+
 private:
     Face QuantizeFace(float screen_angle_deg) const;  // stateful — reads current_face_, see design note 1 above
     std::unique_ptr<TimerFace> CreateFace(Face face);  // the "Factory"
@@ -451,4 +470,10 @@ private:
 
     bool showing_battery_ = false;         // see design note 10
     uint32_t battery_view_hold_ms_ = 0;    // ms continuously in the state opposite showing_battery_'s current value
+    // Defaults to a "full" reading, not 0 — harmless (shows one frame of
+    // "full" instead of an alarming "empty" if the battery view somehow
+    // renders before main.cpp's first real BatteryMonitor::ReadVoltage()
+    // lands), same spirit as the other graceful-default fields in this
+    // codebase (e.g. nvs_calibration.hpp's face_a_offset_deg=0).
+    float battery_voltage_v_ = 4.2f;
 };
