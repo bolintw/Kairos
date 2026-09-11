@@ -7,8 +7,13 @@
 #include "stopwatch_face.hpp"
 
 namespace {
-constexpr uint32_t kFocusMsA = 25 * 60 * 1000;
-constexpr uint32_t kBreakMsA = 5 * 60 * 1000;
+// 25/5 min -> 1min/30s (2026-09-09, temporary) — real values are a pain
+// to sit through while testing the new countdown ring's erosion/tick
+// behavior on hardware; face B (50/10 min) is left at its real duration
+// as the "actually usable" Pomodoro option in the meantime. Revert once
+// the ring itself is settled.
+constexpr uint32_t kFocusMsA = 1 * 60 * 1000;
+constexpr uint32_t kBreakMsA = 30 * 1000;
 constexpr uint32_t kFocusMsB = 50 * 60 * 1000;
 constexpr uint32_t kBreakMsB = 10 * 60 * 1000;
 
@@ -75,30 +80,22 @@ constexpr uint32_t kIdleSleepThresholdMs = kIdlePreDimHoldMs + kIdleFadeToDimMs 
 // covering that. Widened to 800.
 constexpr uint32_t kTapMuteAfterSwitchMs = 800;
 
-// See app_controller.hpp design note 7 — outer ring breathe window, in
-// whole seconds not ms: the primary label displays remaining_ms/1000
-// (truncated), so comparing truncated seconds directly (rather than a
-// flat *000ms threshold, which caused a real one-second sync lag caught
-// on hardware 2026-08-25) keeps the ring in sync with whichever second is
-// actually on screen. There used to be a second, wider "solid ring" window
-// (kRingShowWindowSec, last ~30s) doubling up with brightness's own
-// end-of-phase ramp as a second "approaching the end" cue — dropped
-// 2026-08-26: the ring was already always solid-255 while paused, so
-// during that 30s window a paused ring and a merely-running-near-the-end
-// ring looked identical, and pausing inside it was invisible (couldn't
-// tell whether it had actually triggered). The ring now means exactly
-// one thing at any of these thresholds — paused — plus this one
-// breathing window as a distinct "about to end" cue while still
-// running; the wider approach-cue lives only in brightness now
-// (kFocusEndRampWindowMs above).
-constexpr uint32_t kRingBreathWindowSec = 5;
-// A hard on/off blink (2026-08-25 first version) read as too harsh on
-// hardware — replaced same day with a smooth breathing fade between this
-// floor and full opacity, one full cycle per kRingBreathPeriodMs. Floor
-// kept well above 0 so the ring never fully disappears mid-breath, unlike
-// the old blink's flat-off half.
-constexpr uint32_t kRingBreathPeriodMs = 1000;
-constexpr uint8_t kRingBreathFloorOpa = 60;
+// See app_controller.hpp design note 7 — the paused ring-tick's on/off
+// blink. 2026-09-09: tried a smooth cosine breathing fade first (reusing
+// the ring's old "last few seconds" effect's exact shape), then a slower
+// version of the same fade after it read as too fast/anxious — the user's
+// actual ask was neither: revert to the *older* mechanism this app
+// already tried once before, a hard on/off blink (2026-08-25's first-ever
+// ring-breathing version, itself later replaced for being "too harsh" —
+// but that was in a different role, an urgent last-seconds cue; here,
+// wanted back specifically for this calmer "just paused" indicator).
+// kRingBlinkHalfPeriodMs matches that original's exact cadence
+// (`(remaining_ms/1000) % 2`, i.e. a flat 1 real second on, 1 off).
+constexpr uint32_t kRingBlinkHalfPeriodMs = 1000;
+
+// See app_controller.hpp design note 7 — count-up ring wraps once per
+// real hour.
+constexpr uint32_t kRingCountUpPeriodMs = 3600u * 1000u;
 
 // See app_controller.hpp design note 10. Asymmetric on purpose: still a
 // deliberate hold to enter (500ms — 2000ms->500ms 2026-09-08, first-hardware-
@@ -186,7 +183,7 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
             current_->onTick(dt_ms);
         }
         gui_manager_.SetBrightness(1.0f);
-        gui_manager_.SetRingOpacity(0);
+        gui_manager_.SetRingVisible(false);
         gui_manager_.SetBatteryLevel(kStubBatteryFilledBlocks);  // TODO: real ADC reading, see design note 10
         return;
     }
@@ -222,6 +219,12 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
             current_->onEnter();
         }
 
+        // Re-snap the ring's "12 o'clock" to this face's own upright
+        // orientation — see design note 7 and GuiManager::SetRingOrientation()'s
+        // comment. Once per switch, not every tick: the ring deliberately
+        // doesn't counter-rotate continuously the way root_ does.
+        gui_manager_.SetRingOrientation(FaceCenterDeg(current_face_));
+
         // A flip should always read as an obvious bright event,
         // regardless of edge detection below (the new face always
         // starts paused, so is_running true->false/false->true
@@ -251,7 +254,7 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
         current_->onTick(dt_ms);
     }
     UpdateBrightness(dt_ms, attitude.is_moving);
-    UpdateRing();
+    UpdateRing(dt_ms);
     if (current_) {
         current_->render(gui_manager_);
     }
@@ -349,46 +352,75 @@ void AppController::NotifyWokeFromIdleSleep()
     gui_manager_.SetBrightness(brightness_);
 }
 
-void AppController::UpdateRing()
+void AppController::UpdateRing(uint32_t dt_ms)
 {
     if (!current_) {
-        gui_manager_.SetRingOpacity(0);
+        gui_manager_.SetRingVisible(false);
+        ring_pause_blink_elapsed_ms_ = 0;
         return;
     }
 
     const TimerFace::Status status = current_->GetStatus();
 
-    if (!status.is_running) {
-        gui_manager_.SetRingOpacity(255);  // paused
+    if (!status.has_target && !status.is_count_up) {
+        // Nothing to show progress for — e.g. BreathFace's true idle
+        // screen (see its GetStatus()). Distinct from "the ring reads
+        // 0%/100%", which the branches below already cover on their own.
+        gui_manager_.SetRingVisible(false);
+        ring_pause_blink_elapsed_ms_ = 0;
         return;
     }
-    if (!status.has_target) {
-        gui_manager_.SetRingOpacity(0);  // running, no phase end to signal (count-up)
+    gui_manager_.SetRingVisible(true);
+
+    // elapsed_fraction: how far through the current phase (countdown) or
+    // current hour (count-up) things are, 0..1 — see design note 7 for
+    // the two shapes this drives in GuiManager::SetRingProgress().
+    float elapsed_fraction;
+    if (status.has_target) {
+        elapsed_fraction = status.target_ms > 0
+            ? 1.0f - static_cast<float>(status.remaining_ms) / static_cast<float>(status.target_ms)
+            : 1.0f;  // defensive only — a real has_target phase should never report target_ms==0
+    } else {
+        // is_count_up: remaining_ms is repurposed to carry elapsed ms this
+        // run (see Status's own field comment).
+        const uint32_t elapsed_in_period_ms = status.remaining_ms % kRingCountUpPeriodMs;
+        elapsed_fraction = static_cast<float>(elapsed_in_period_ms) / static_cast<float>(kRingCountUpPeriodMs);
+    }
+    gui_manager_.SetRingProgress(elapsed_fraction, /*growing=*/status.is_count_up);
+
+    if (status.is_running) {
+        // Reset here, not just left alone, so a *later* pause always
+        // starts its blink from "on" rather than resuming wherever an
+        // earlier pause happened to leave ring_pause_blink_elapsed_ms_.
+        ring_pause_blink_elapsed_ms_ = 0;
+        gui_manager_.SetRingTickOpacity(255);
         return;
     }
-    const uint32_t seconds_left = status.remaining_ms / 1000;  // matches the displayed digit, see the constants' comment above
-    if (seconds_left > kRingBreathWindowSec) {
-        gui_manager_.SetRingOpacity(0);  // running, not yet near the end — the brightness ramp carries that cue now
+
+    // Not running: only show the tick at all once there's genuine
+    // progress to pause *from* (2026-09-09) — a brand-new face (or a
+    // phase that just auto-advanced) starts paused with
+    // elapsed_fraction==0, and shouldn't show the tick yet at all; it
+    // first appears once the phase actually starts running, then blinks
+    // if paused again later. The ring itself already reads as
+    // unambiguously fresh on its own (a full or empty circle, whichever
+    // mode) without the tick doing anything on top of it.
+    constexpr float kMinElapsedFractionForTick = 0.001f;  // guards against float noise landing exactly at 0
+    if (elapsed_fraction <= kMinElapsedFractionForTick) {
+        ring_pause_blink_elapsed_ms_ = 0;
+        gui_manager_.SetRingTickOpacity(0);
         return;
     }
-    // Last kRingBreathWindowSec seconds, still running (the !is_running
-    // check above already caught paused, including paused mid-breath —
-    // pausing here always reads as a full, unambiguous 255, never a
-    // half-breath, and resuming falls back into this branch and picks the
-    // wave up from wherever remaining_ms already was, since it never
-    // moved while paused): breathe in sync with remaining_ms's own
-    // position within the current second, same "derive from the value
-    // already on screen, no separate timer" reasoning as the old blink
-    // (design note 7) — a cosine wave that troughs at kRingBreathFloorOpa
-    // right on each second boundary (matching the moment the displayed
-    // digit ticks over) and peaks at full opacity mid-second.
-    constexpr float kTwoPi = 6.28318530718f;
-    const uint32_t phase_ms = status.remaining_ms % kRingBreathPeriodMs;
-    const float phase = static_cast<float>(phase_ms) / static_cast<float>(kRingBreathPeriodMs);
-    const float wave = 0.5f - 0.5f * std::cos(kTwoPi * phase);  // 0 at phase 0, 1 at phase 0.5
-    const uint8_t opa = kRingBreathFloorOpa +
-                         static_cast<uint8_t>(wave * static_cast<float>(255 - kRingBreathFloorOpa));
-    gui_manager_.SetRingOpacity(opa);
+
+    // Paused, with real progress already made: hard on/off blink — see
+    // design note 7 for why this isn't the smooth breathing fade anymore.
+    // Driven by a real wall-clock accumulator (advanced here by dt_ms)
+    // rather than remaining_ms, which is frozen while paused — the whole
+    // reason this needs its own timer instead of reusing the original
+    // `(remaining_ms/1000) % 2` formula directly.
+    ring_pause_blink_elapsed_ms_ += dt_ms;
+    const bool blink_on = (ring_pause_blink_elapsed_ms_ / kRingBlinkHalfPeriodMs) % 2 == 0;
+    gui_manager_.SetRingTickOpacity(blink_on ? 255 : 0);
 }
 
 void AppController::OnTap()

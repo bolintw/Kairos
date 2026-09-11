@@ -171,40 +171,107 @@
 //    call) — those shape what counts as a tap at all, this just ignores
 //    genuine taps for a moment after a flip.
 //
-// 7. Outer ring (2026-08-25, "UI polish" pass, revised 2026-08-26): a
-//    second notification channel alongside brightness — GuiManager's
-//    ring_ (see its header). Purely a function of the current
-//    TimerFace::Status snapshot each tick, no elapsed-time state of its
-//    own, unlike UpdateBrightness's fade/idle timers — "paused" and
-//    "remaining_ms" are already facts available every tick.
+// 7. Outer ring (2026-08-25, "UI polish" pass; redesigned 2026-09-09 into
+//    a progress ring): a second notification channel alongside
+//    brightness — GuiManager's ring_/ring_tick_ (see their header
+//    comment). Original (2026-08-25/26) meaning — solid while paused,
+//    a closing-seconds breathing cue while running near the end,
+//    otherwise hidden — replaced entirely: the user wanted the ring to
+//    show *actual progress*, not just a late-stage cue.
 //
-//    Settled meaning (2026-08-26): the ring means exactly one thing,
-//    "paused" (solid), at any point in a phase — checked first in
-//    UpdateRing(), unconditionally, before anything else — PLUS a
-//    distinct breathing cue in the closing kRingBreathWindowSec seconds
-//    while still running. Originally also solid for a much wider ~30s
-//    "approaching the end" window regardless of running/paused — dropped
-//    same day the caption (note 8) shipped, once the user noticed a
-//    paused ring and a merely-near-the-end running ring looked identical
-//    in that window, making it impossible to tell from the ring alone
-//    whether a pause during those 30s had actually registered. The
-//    wider "approaching the end" cue still exists, just moved entirely
-//    to brightness (kFocusEndRampWindowMs) — the ring no longer
-//    double-duties as that signal.
+//    New meaning: the ring's visible arc directly tracks how far through
+//    the current phase (or, for a count-up face, the current hour) things
+//    are, clockwise from 12 o'clock:
+//      - Countdown (TimerFace::Status::has_target — PomodoroFace,
+//        BreathFace's every phase including kReady): starts as a full
+//        circle and *erodes* — the eaten portion (gone, starting at 12
+//        o'clock) grows clockwise as remaining_ms falls, reaching fully
+//        empty exactly at remaining_ms=0. elapsed_fraction =
+//        1 - remaining_ms/target_ms (target_ms is new on Status, 2026-09-09
+//        — the ring needs the phase's *original* duration, which
+//        remaining_ms alone can't supply).
+//      - Count-up (Status::is_count_up — StopwatchFace only): the
+//        opposite shape, *grows* from nothing at 12 o'clock, one full
+//        revolution per hour, wrapping back to empty and starting over —
+//        elapsed_fraction = (elapsed_ms mod 1 hour) / 1 hour. remaining_ms
+//        is repurposed on Status to carry elapsed_ms for this case (see
+//        its own field comment) since it's otherwise unused/meaningless
+//        for a face with no target.
+//      - Neither flag set (BreathFace's true kIdle screen; no current_ at
+//        all) — GuiManager::SetRingVisible(false), no progress to show.
 //
-//    Because the `!is_running` check runs first and unconditionally,
-//    pausing during the breathing window snaps straight to solid 255
-//    with no special-casing needed, and resuming falls back into the
-//    breathing branch and picks the wave up from wherever it already
-//    was — remaining_ms is frozen while paused, so nothing needs to
-//    remember "the brightness before pausing", it's just still there.
+//    Both shapes share the exact same "moving edge" angle
+//    (elapsed_fraction*360 degrees clockwise from 12), which is also
+//    where the small tick mark (ring_tick_) sits — GuiManager's
+//    SetRingProgress() positions both from that one angle each call, see
+//    its own comment for the eroding-vs-growing arc-placement difference.
+//    The ring itself is a pure function of Status each tick (elapsed_ms/
+//    remaining_ms/target_ms), same as before — no state of its own beyond
+//    what GuiManager's own dirty-check needs.
 //
-//    The breathing itself was originally a hard on/off blink derived
-//    from (remaining_ms/1000) % 2; the user found that too harsh on real
-//    hardware, replaced same day with a smooth fade (SetRingOpacity, a
-//    cosine wave over remaining_ms % 1000) — still derived straight from
-//    remaining_ms rather than a separate accumulating timer, so it can't
-//    drift out of phase with the digits.
+//    Tick geometry (2026-09-09, revised same day from hardware feedback):
+//    reaches inward from the ring toward the center (kRingTickWidthPx,
+//    roughly a fifth of kRingRadiusPx), not outward past the ring's outer
+//    edge — first version poked outward, user wanted the opposite
+//    direction.
+//
+//    Per-face orientation (2026-09-09, same feedback round): the ring's
+//    own "12 o'clock" now re-snaps to match whichever face is showing —
+//    GuiManager::SetRingOrientation(FaceCenterDeg(current_face_)), called
+//    once at every face-switch commit (see Update() below), not every
+//    tick. First version left the ring's rotation fixed at face B's
+//    orientation always, so on any other face its 12 o'clock pointed
+//    somewhere that wasn't actually "up" for that face's own upright
+//    content — e.g. on face A (FaceCenterDeg=-90, reached by rotating the
+//    device -90 degrees/CCW from B), the fixed reference physically
+//    landed at what would be B's own 9 o'clock. Re-snapping per face,
+//    instead of continuously tracking screen_angle_deg the way root_
+//    does, keeps this off the transform/matrix crash path (see
+//    GuiManager's class doc) while still reading correctly once a flip
+//    settles.
+//
+//    Running vs paused — the ring freezes at whatever erosion/growth
+//    state it was at, it does NOT restore/reset on pause (that was an
+//    explicit requirement: pausing right at the very start of a countdown
+//    must not look identical to a fresh, never-started one). The *tick*
+//    is what signals running vs paused instead, and goes through three
+//    states rather than two (2026-09-09, final form after two rounds of
+//    hardware feedback):
+//      - Fresh, never (yet) started — elapsed_fraction==0, whether that's
+//        a just-entered face or a phase that just auto-advanced (e.g.
+//        focus->break): tick hidden entirely (opacity 0). The ring itself
+//        (a full or empty circle, unambiguous on its own depending on
+//        mode) is already a clear enough "this is fresh" signal without
+//        the tick doing anything on top of it.
+//      - Running: tick visible, steady/full opacity, riding the moving
+//        edge.
+//      - Paused with real progress already made (elapsed_fraction > 0):
+//        tick blinks, hard on/off (kRingBlinkHalfPeriodMs — see its own
+//        comment for why this ended up a flat blink rather than a smooth
+//        fade, after two earlier attempts at the latter).
+//    First version (screen-off / vanish while paused, no blink at all)
+//    read as not obvious enough on hardware — a blink is a much stronger
+//    cue than presence-vs-absence, the classic VCR/DVD "steady while
+//    playing, blinking while paused" convention.
+//
+//    Can't reuse remaining_ms to drive the blink's phase the way the
+//    ring's old breathing effect drove its wave off
+//    `remaining_ms % kRingBreathPeriodMs` — remaining_ms is frozen while
+//    paused, which is the whole point here. ring_pause_blink_elapsed_ms_
+//    is a real wall-clock accumulator instead (advances by dt_ms only
+//    while genuinely blinking, reset to 0 in both other states — running,
+//    or fresh-and-unstarted — so a later real pause always starts its
+//    blink "on" rather than resuming wherever an earlier pause happened
+//    to leave off).
+//
+//    BreathFace's render() used to override the ring itself right after
+//    UpdateRing() ran (a bespoke rise/hold/fall opacity envelope, "the
+//    ring IS the exercise") — removed 2026-09-09: the new generic
+//    countdown ring already does the same job (every breath phase has a
+//    real target_ms), just running faster since these phases are seconds
+//    long, not minutes. One mechanism for every has_target face now,
+//    instead of PomodoroFace/generic-countdown using one and BreathFace
+//    quietly overriding it with another.
 //
 // 8. Phase-transition caption (2026-08-26): entirely inside PomodoroFace,
 //    not AppController — see pomodoro_face.hpp's transition_remaining_ms_
@@ -356,7 +423,7 @@ private:
     Face QuantizeFace(float screen_angle_deg) const;  // stateful — reads current_face_, see design note 1 above
     std::unique_ptr<TimerFace> CreateFace(Face face);  // the "Factory"
     void UpdateBrightness(uint32_t dt_ms, bool is_moving);  // see design note 5 above
-    void UpdateRing();  // see design note 7 above
+    void UpdateRing(uint32_t dt_ms);  // see design note 7 above — dt_ms drives the paused tick's blink timer
     void UpdateBatteryView(const AttitudeEstimator::Output& attitude, uint32_t dt_ms);  // see design note 10 above
 
     GuiManager& gui_manager_;
@@ -371,6 +438,8 @@ private:
     uint32_t prev_remaining_ms_ = 0;
 
     uint32_t tap_mute_remaining_ms_ = 0;  // see design note 6
+
+    uint32_t ring_pause_blink_elapsed_ms_ = 0;  // see design note 7 — real wall-clock ms, not tied to remaining_ms
 
     bool showing_battery_ = false;         // see design note 10
     uint32_t battery_view_hold_ms_ = 0;    // ms continuously in the state opposite showing_battery_'s current value

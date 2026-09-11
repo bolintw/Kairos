@@ -159,10 +159,11 @@ uint32_t BreathFace::PhaseTotalMs() const
 void BreathFace::render(GuiManager& gui)
 {
     if (phase_ == Phase::kIdle) {
-        // Paused/idle: no ring override here — AppController's own
-        // generic "!is_running -> solid ring" already applies (GetStatus()
-        // below reports is_running=false), same paused-indicator meaning
-        // as every other face.
+        // No ring here — GetStatus() reports has_target=false and
+        // is_count_up=false while idle (no phase active, and this isn't a
+        // count-up face either), which is exactly what tells
+        // AppController's ring logic to hide the ring entirely rather
+        // than render either progress mode.
         gui.SetAccentColor(kColorInhale);
         gui.SetSecondaryText("");
         if (done_caption_remaining_ms_ > 0) {
@@ -215,13 +216,24 @@ void BreathFace::render(GuiManager& gui)
     gui.SetPrimaryText(buf);
 
     // The ring IS the exercise here, not a secondary cue (unlike every
-    // other face's ring usage) — see the class comment. Linear envelope
-    // across the whole phase: rising through inhale, held flat through
-    // hold, falling through exhale. Runs AFTER AppController's own
-    // UpdateRing() in the tick sequence (see main.cpp/app_controller.cpp
+    // other face's ring usage) — see the class comment. Briefly replaced
+    // (2026-09-09) by AppController's generic countdown-erosion ring
+    // (every has_target phase gets one now, kReady included), then
+    // restored the same day — the user specifically wanted this face's
+    // own rise-through-inhale/hold-flat/fall-through-exhale opacity
+    // envelope back, not the erosion visual. Runs AFTER AppController's
+    // own UpdateRing() in the tick sequence (see main.cpp/app_controller.cpp
     // call order), so this always has the final say while a phase is
     // active — same override pattern PomodoroFace's caption already uses
-    // for text opacity.
+    // for text opacity. SetRingProgress(0, eroding) forces the arc back to
+    // a full circle (UpdateRing() would otherwise have set a partial span
+    // moments earlier this same tick); SetRingTickOpacity(0) hides the
+    // tick, which has no meaning for this envelope — it only makes sense
+    // alongside the erosion visual this face isn't using.
+    gui.SetRingVisible(true);
+    gui.SetRingProgress(0.0f, /*growing=*/false);
+    gui.SetRingTickOpacity(0);
+
     const uint32_t phase_total_ms = PhaseTotalMs();
     const uint32_t elapsed_ms = phase_total_ms - phase_remaining_ms_;
     const float t = phase_total_ms > 0
@@ -247,6 +259,18 @@ TimerFace::Status BreathFace::GetStatus() const
     // user needs the display legible through a still 7s hold, when
     // there's no tap or movement to otherwise count as "interacting" and
     // keep AppController's normal fade-while-idle logic from dimming it
-    // mid-exercise.
-    return Status{running_, /*has_target=*/running_, phase_remaining_ms_, /*is_break_phase=*/running_};
+    // mid-exercise. Deliberately still tied to running_, not phase_ —
+    // unlike has_target just below, this one's whole point is "actively
+    // mid-exercise right now."
+    //
+    // has_target: was `= running_` (2026-09-09, changed) — under the old
+    // ring policy that only mattered while running anyway (a paused ring
+    // just went solid regardless), but the new countdown ring needs to
+    // keep showing the *frozen* erosion state while paused mid-phase, not
+    // report has_target=false and have AppController conclude there's
+    // nothing to show. `phase_ != kIdle` is true for the whole time a
+    // phase is selected, running or not; only true idle (no session, or
+    // one just ended) reports false.
+    return Status{running_, /*has_target=*/phase_ != Phase::kIdle, phase_remaining_ms_, /*is_break_phase=*/running_,
+                  /*target_ms=*/PhaseTotalMs(), /*is_count_up=*/false};
 }

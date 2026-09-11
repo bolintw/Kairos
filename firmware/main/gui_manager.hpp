@@ -41,17 +41,66 @@ constexpr const lv_font_t* kPrimaryFont = &font_space_grotesk_bold_40;
 // Panel is 240x240 (see lgfx_config.hpp / main.cpp's lv_display_create).
 constexpr int32_t kPanelSizePx = 240;
 
-// Outer ring (2026-08-25, "UI polish" pass): a plain circular border, shown
-// while paused / near a phase's end, hidden while running mid-phase — see
-// AppController's UpdateRing() for the actual show/hide/blink policy, this
-// is just the geometry. Sized close to the panel edge with a bit of
-// margin so it doesn't get clipped. Unlike root_ above, ring_ does NOT
-// need to counter-rotate — a circle is rotationally symmetric, so it's a
-// plain static lv_obj on lv_screen_active(), not a root_ child, and never
-// touches the transform/matrix code path that caused the three rotation
-// crashes documented below.
+// Outer ring (2026-08-25, "UI polish" pass; redesigned 2026-09-09 into a
+// progress ring — see AppController's UpdateRing() design note for the
+// full policy, this is just the geometry): a thin circular arc plus a
+// small tick mark riding its moving edge. Sized close to the panel edge
+// with a bit of margin so it doesn't get clipped. Unlike root_ above,
+// neither piece needs to counter-rotate continuously — this app's own
+// CW-positive convention plus a per-face base rotation (12 o'clock =
+// angle 0, re-snapped only on a face switch — see
+// GuiManager::SetRingOrientation()) is enough, no per-tick trig against
+// screen_angle_deg needed, so both stay plain static lv_arc objects on
+// lv_screen_active(), not root_ children, and never touch the
+// transform/matrix code path that caused the three rotation crashes
+// documented below.
 constexpr int32_t kRingRadiusPx = 112;
-constexpr int32_t kRingWidthPx = 6;
+// 6 -> 14 (2026-09-09, Apple Watch charging-ring reference) -> 7
+// (2026-09-11, user's own hand-drawn mockup gave an explicit "~7" spec,
+// superseding the Apple Watch guess — the widened 14px version wasn't the
+// style they wanted). kRingTickHalfSpanDeg (below) is derived from this,
+// so the tick's own thickness scales with it automatically.
+constexpr int32_t kRingWidthPx = 7;
+// Dim background track (2026-09-09, same Apple Watch reference): a
+// second, always-full-circle arc drawn *behind* ring_ (created first in
+// the constructor — LVGL draws later-added siblings on top, same
+// ordering logic as main.cpp's debug-overlay z-order note) at a low, fixed
+// opacity — so the "already elapsed" portion of a countdown reads as a
+// dim ring instead of nothing, matching that reference's dark-green
+// unfilled arc against the bright green filled one, rather than the
+// filled portion appearing to float with no visible full-circle context.
+// Shares ring_'s geometry and (via SetAccentColor()) hue; only its
+// opacity is different, and it never changes shape — SetRingProgress()
+// doesn't touch it, only the bright ring_/ring_tick_ move.
+constexpr uint8_t kRingTrackOpa = 70;  // ~27% of full — starting guess
+// Tick mark: a short straight radial line from 12 o'clock in toward the
+// center, at the countdown's current moving boundary — confirmed correct
+// on real hardware 2026-09-11 ("直線的顯示對了") after two false starts the
+// same day: first a black "cut into the ring" (invisible — the panel
+// background is already black, main.cpp, so painting black over it, most
+// of the notch's own footprint, is a no-op), then a fixed-white line
+// (visible and correctly shaped, but the user wanted it tinted like the
+// ring, not standing out in white — SetAccentColor() drives its color now,
+// same as ring_/ring_track_). The actual shape fix neither of those
+// touched: arc_rounded=false (flat caps, matching ring_/ring_track_)
+// instead of the original rounded caps, which is what made every earlier
+// attempt read as a blob instead of a line regardless of color. Built the
+// same way as the main ring — a thin lv_arc segment, since LVGL has no
+// plain radial-line primitive. Geometry: kRingTickWidthPx (how far inward
+// it reaches, roughly a fifth of kRingRadiusPx) shares the main ring's own
+// outer edge (kRingTickRadiusPx == kRingRadiusPx) and reaches well past
+// the ring's own inner edge, into the empty center, so it reads as poking
+// inward rather than just matching the ring's own band. kRingTickHalfSpanDeg
+// is derived from kRingWidthPx so the tick's *tangential* extent at that
+// radius works out to the same stroke thickness as the ring itself
+// ("線條粗度跟外圈相等", confirmed correct alongside the shape/color above)
+// — a fixed literal half-span, sized by eye, wouldn't automatically match
+// if kRingWidthPx ever changes. arc-length = radius * angle(rad), so
+// half_span_rad = (kRingWidthPx/2) / kRingRadiusPx; converted to degrees
+// below.
+constexpr int32_t kRingTickRadiusPx = kRingRadiusPx;
+constexpr int32_t kRingTickWidthPx = kRingRadiusPx / 5;
+constexpr float kRingTickHalfSpanDeg = (kRingWidthPx * 180.0f) / (2.0f * kRingRadiusPx * 3.14159265f);
 
 // Size of root_, the rotating container around the primary label — NOT
 // the full panel. See the design note below for why: a full 240x240
@@ -198,15 +247,62 @@ public:
     // color — the two never fight).
     void SetAccentColor(lv_color_t color);
 
-    // Sets the outer ring's border opacity, 0 (invisible) to 255 (fully
-    // opaque) — see AppController::UpdateRing() for the policy (paused /
-    // near-phase-end solid / last-5s breathing). A single continuous
-    // control rather than a visible/hidden toggle so the last-5s "breathe"
-    // (2026-08-25, replaced a hard on/off blink the user found too
-    // harsh) can drive it as a smooth sine wave instead of a snap.
-    // Geometry (radius/width) is fixed at compile time via
-    // kRingRadiusPx/kRingWidthPx above.
+    // Progress ring (2026-09-09) — see AppController::UpdateRing() for the
+    // full policy this renders, this quartet just draws whatever it's
+    // told.
+    //
+    // Re-snaps the ring's own "12 o'clock" reference to match whichever
+    // face is currently showing — called once per face switch (not every
+    // tick, unlike root_'s continuous SetRotationDeg()), since the ring
+    // deliberately doesn't counter-rotate in real time (see the class
+    // comment's crash history for why nothing here touches that path).
+    // face_center_deg: FaceCenterDeg(current_face_) from
+    // app_controller.cpp, i.e. the screen_angle_deg this face reads
+    // upright at (B=0, A=-90, C=90, D=180). Internally offsets by the same
+    // -90 SetRingProgress() already assumes puts angle-0 at 12 o'clock for
+    // face B, so passing 0 here reproduces the original fixed behavior
+    // exactly.
+    void SetRingOrientation(float face_center_deg);
+
+    // elapsed_fraction: 0..1 (clamped internally), how far through the
+    // current phase/hour the moving edge has traveled. growing=false
+    // (countdown/eroding): the ring starts full and the visible arc
+    // shrinks from elapsed_fraction*360 clockwise around to 360 degrees —
+    // i.e. the *eaten* portion is [0, elapsed_fraction*360), starting at
+    // 12 o'clock. growing=true (count-up): the visible arc instead grows
+    // from 0 up to elapsed_fraction*360. Either way the moving edge sits
+    // at elapsed_fraction*360 degrees clockwise from 12 o'clock — that's
+    // also exactly where the tick mark is drawn, so both objects are
+    // positioned from the same single angle each call.
+    void SetRingProgress(float elapsed_fraction, bool growing);
+
+    // Main ring opacity, 0-255, independent of SetRingTickOpacity() below
+    // — re-added 2026-09-09 for BreathFace's own rise/hold/fall envelope
+    // ("the ring IS the breathing exercise", restored after briefly being
+    // replaced by the generic countdown ring every other has_target face
+    // uses): BreathFace's render() calls SetRingProgress(0, false) first
+    // to force a full-circle span, then this to fade that whole circle's
+    // opacity through inhale/hold/exhale, overriding whatever
+    // AppController's own UpdateRing() set moments earlier in the same
+    // tick (same override pattern PomodoroFace's caption already uses for
+    // text opacity — render() always runs after UpdateRing()).
     void SetRingOpacity(uint8_t opa);
+
+    // Shows or hides the whole ring (main arc + tick together) — there
+    // are states with nothing meaningful to show progress for at all
+    // (e.g. BreathFace's true idle screen, or no current face), distinct
+    // from "the ring is showing 0%/100%", which SetRingProgress()'s
+    // elapsed_fraction already covers on its own.
+    void SetRingVisible(bool visible);
+
+    // Tick/notch opacity only, 0-255 — position is whatever
+    // SetRingProgress()'s last call put it at; this doesn't move it.
+    // AppController holds this at 255 while the phase/run is actively
+    // counting (cut visible) and hard-blinks it 255/0 every
+    // kRingBlinkHalfPeriodMs while paused (see its UpdateRing() design
+    // note) — a literal on/off blink, not a smooth fade; at 0 the ring
+    // reads whole/uncut, same as before the phase ever started.
+    void SetRingTickOpacity(uint8_t opa);
 
     // Counter-rotates the primary label's small root_ container (see
     // class doc) so it stays upright as the physical device rotates.
@@ -311,8 +407,14 @@ private:
     int32_t last_rotation_1deg_ = 0;
     int64_t last_rotation_update_us_ = 0;
     bool has_last_rotation_ = false;
+    int32_t last_ring_angle_deg10_ = -1;  // tenths of a degree; -1 = never set, forces the first SetRingProgress() to draw
+    bool last_ring_growing_ = false;
+    bool last_ring_visible_ = false;
+    bool has_last_ring_visible_ = false;
     uint8_t last_ring_opa_ = 0;
     bool has_last_ring_opa_ = false;
+    uint8_t last_ring_tick_opa_ = 0;
+    bool has_last_ring_tick_opa_ = false;
     uint8_t last_text_opa_ = 0;
     bool has_last_text_opa_ = false;
     uint32_t update_count_ = 0;
@@ -324,6 +426,8 @@ private:
     lv_obj_t* root_;
     lv_obj_t* secondary_label_;
     lv_obj_t* label_;
+    lv_obj_t* ring_track_;
     lv_obj_t* ring_;
+    lv_obj_t* ring_tick_;
     lv_obj_t* battery_bands_[kBatteryBlockCount];
 };

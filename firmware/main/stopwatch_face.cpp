@@ -61,5 +61,11 @@ void StopwatchFace::render(GuiManager& gui)
 
 TimerFace::Status StopwatchFace::GetStatus() const
 {
-    return Status{running_, /*has_target=*/false, /*remaining_ms=*/0, /*is_break_phase=*/false};
+    // remaining_ms repurposed as "ms elapsed this run" (2026-09-09, see
+    // timer_face.hpp's Status comment) — it had no meaning for a
+    // has_target=false face before; now it's what AppController's ring
+    // uses to grow a count-up progress ring (one hour per revolution),
+    // which is_count_up=true selects.
+    return Status{running_, /*has_target=*/false, elapsed_ms_, /*is_break_phase=*/false, /*target_ms=*/0,
+                  /*is_count_up=*/true};
 }
