@@ -399,15 +399,71 @@
 //     pessimistic right at the ends; good enough for an at-a-glance gauge,
 //     not treated as a lab-accurate percentage anywhere else.
 //
-//     Known gap, still not hidden: while showing_battery_, idle-sleep's
-//     own countdown (design note 9) is untouched — it only ever advances
-//     while the underlying face reports !is_running anyway, so checking
-//     the battery while a timer is actively running never idle-sleeps
-//     regardless. The plan-doc's low-battery-safety-net design (forced
-//     "please charge" screen, then forced deep sleep below a lower
-//     threshold, no tap/wake accepted) still isn't implemented — now that
-//     a real voltage reading exists it's no longer blocked on the ADC
-//     side, just not built yet; revisit next.
+//     Gap closed 2026-09-11: this view used to hold brightness at a flat
+//     1.0f with no idle-sleep countdown of its own at all — pick the
+//     device up to check the gauge, then leave it tilted without setting
+//     it back down or otherwise interacting, and it would just stay lit
+//     indefinitely. Now runs the exact same bright-hold/fade/dim-hold/
+//     sleep timeline as everything else, via its own
+//     battery_view_idle_elapsed_ms_ counter (see design note 11, which
+//     added the shared IdleBrightnessCurve() helper this reuses, and
+//     which the same fix was made for). Unlike design note 11's screen,
+//     the underlying face is left running here, not force-paused — a
+//     quick glance at the battery gauge isn't the same kind of "stop
+//     what you're doing" event a critically low battery is.
+//
+// 11. Low-battery warning screen (2026-09-11) — stage 1 of the plan-doc's
+//     two-stage low-battery safety net (stage 2, forced deep sleep below
+//     a lower threshold with no tap/wake accepted, still isn't built;
+//     this is deliberately scoped to stage 1 alone). Voltage-driven, not
+//     gesture-driven like design note 10's battery-check view: evaluated
+//     every tick against battery_voltage_v_ with its own hysteresis pair
+//     (kLowBatteryEnterV/kLowBatteryExitV — same enter-high/exit-lower
+//     shape as kAzInvalidEnterThresholdG/kAzValidReturnThresholdG in
+//     AttitudeEstimator, same reason: avoid flip-flopping right at a
+//     boundary). showing_low_battery_ forces a "please charge" screen
+//     over whatever face/phase was showing — deliberately NOT exempt from
+//     idle-sleep the way showing_battery_ is: staying fully bright
+//     indefinitely while already low on charge works against the exact
+//     thing this screen exists to protect ("一直亮著電量好像也沒幫助" —
+//     the user's own framing). Runs its own copy of design note 5's
+//     bright-hold/fade/dim-hold/cut-to-off timeline
+//     (kIdlePreDimHoldMs/kIdleFadeToDimMs/kIdleDimHoldMs/
+//     kIdleSleepThresholdMs, reused as-is) against a separate
+//     low_battery_idle_elapsed_ms_ counter rather than paused_elapsed_ms_,
+//     since there's no TimerFace::Status to derive is_running/just_paused
+//     from here — attitude.is_moving alone resets it (mirrors design note
+//     5's "spinning it in their hand" case), and OnTap() has its own
+//     early-return branch (matching showing_battery_'s — see OnTap())
+//     that resets it and swallows the tap rather than forwarding to
+//     current_->onTap(), same "don't let incidental interaction reach the
+//     hidden face" reasoning as design note 9's wake-tap handling.
+//     Unlike design note 10's battery-check view, a running timer is NOT
+//     just left ticking silently underneath — UpdateLowBatteryHysteresis()
+//     force-pauses it (a synthetic onTap() the instant showing_low_battery_
+//     becomes true, since every face's onTap() while running_ means
+//     "pause" by their own shared convention) and it can't be resumed by
+//     tapping until the warning clears, since OnTap() swallows every real
+//     tap in the meantime. current_->onTick() is still called every tick
+//     regardless (harmless no-op while paused, keeps e.g. BreathFace's
+//     unconditional done-caption countdown correct). Shares the exact
+//     brightness curve math with
+//     UpdateBrightness()'s paused-idle fade via a small free function
+//     (IdleBrightnessCurve() in app_controller.cpp) rather than
+//     duplicating it a second time. Feeds into ShouldEnterIdleSleep() and
+//     NotifyWokeFromIdleSleep() alongside paused_elapsed_ms_ so main.cpp's
+//     existing RunIdleSleep()/WoM-wake machinery (design note 9) handles
+//     this case for free — no changes needed there. kLowBatteryEnterV/
+//     kLowBatteryExitV are starting guesses, not tuned against real
+//     hardware yet. The visual (kLowBatteryColor, orange-amber — adjusted
+//     once from the original plain "Charge" in warning red) is confirmed
+//     triggering correctly on real hardware (2026-09-12, first real
+//     low-battery event on a test cell), but the text needed a second
+//     pass: "Low\nBattery" as one 2-line primary string clipped its own
+//     top line on real hardware (a label auto-resize/realign bug, not a
+//     root_ clipping issue — see GuiManager::SetPrimaryText()'s comment),
+//     so this now splits "Low" (SetSecondaryText) / "Battery"
+//     (SetPrimaryText) across the two already-single-line labels instead.
 //
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
@@ -452,6 +508,7 @@ private:
     void UpdateBrightness(uint32_t dt_ms, bool is_moving);  // see design note 5 above
     void UpdateRing(uint32_t dt_ms);  // see design note 7 above — dt_ms drives the paused tick's blink timer
     void UpdateBatteryView(const AttitudeEstimator::Output& attitude, uint32_t dt_ms);  // see design note 10 above
+    void UpdateLowBatteryHysteresis();  // see design note 11 above — just flips showing_low_battery_, no rendering
 
     GuiManager& gui_manager_;
     std::unique_ptr<TimerFace> current_;  // nullptr while on face D
@@ -470,10 +527,14 @@ private:
 
     bool showing_battery_ = false;         // see design note 10
     uint32_t battery_view_hold_ms_ = 0;    // ms continuously in the state opposite showing_battery_'s current value
+    uint32_t battery_view_idle_elapsed_ms_ = 0;  // ms continuously shown, drives the same fade/sleep curve as paused_elapsed_ms_ — 2026-09-11
     // Defaults to a "full" reading, not 0 — harmless (shows one frame of
     // "full" instead of an alarming "empty" if the battery view somehow
     // renders before main.cpp's first real BatteryMonitor::ReadVoltage()
     // lands), same spirit as the other graceful-default fields in this
     // codebase (e.g. nvs_calibration.hpp's face_a_offset_deg=0).
     float battery_voltage_v_ = 4.2f;
+
+    bool showing_low_battery_ = false;         // see design note 11
+    uint32_t low_battery_idle_elapsed_ms_ = 0;  // ms continuously shown, drives the same fade/sleep curve as paused_elapsed_ms_
 };

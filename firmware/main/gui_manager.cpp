@@ -110,7 +110,17 @@ GuiManager::GuiManager(LGFX& lcd)
     label_ = lv_label_create(root_);
     lv_obj_set_style_text_font(label_, kPrimaryFont, 0);
     lv_obj_set_style_text_align(label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(label_, LV_ALIGN_BOTTOM_MID, 0, 0);
+    // -3px (2026-09-12, user's own low-battery "Low"/"Battery" screen
+    // feedback — "兩行的字體可以稍微接近一點") — the two labels' line_height
+    // boxes were already stacked flush with zero gap between them, but
+    // each font's line_height includes real leading/padding above and
+    // below its actual glyph ink, so "flush boxes" still reads as a
+    // visible gap. Nudging both labels a few px toward each other closes
+    // that leading-driven gap without touching kRootHeightPx or the
+    // fonts themselves. Applies to every face using both labels together
+    // (this pairing, not just the low-battery screen — e.g. BreathFace's
+    // phase name over its countdown), not scoped to low-battery alone.
+    lv_obj_align(label_, LV_ALIGN_BOTTOM_MID, 0, -3);
     // Set directly here, not left to SetWarmth(0.0f)'s side effect —
     // AppController stopped calling SetWarmth (2026-08-25, brightness-only
     // notifications), which silently left label_ on LVGL's default text
@@ -126,7 +136,7 @@ GuiManager::GuiManager(LGFX& lcd)
     secondary_label_ = lv_label_create(root_);
     lv_obj_set_style_text_font(secondary_label_, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_align(secondary_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(secondary_label_, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_align(secondary_label_, LV_ALIGN_TOP_MID, 0, 3);  // see label_'s -3 offset above — same nudge, opposite direction
     lv_obj_set_style_text_color(secondary_label_, lv_color_white(), 0);
     // Explicit, same lesson as label_'s text-color init above: a fresh
     // lv_label_t defaults to LVGL's own placeholder text ("Text"), not
@@ -275,6 +285,19 @@ void GuiManager::SetPrimaryText(const char* text)
     last_text_[sizeof(last_text_) - 1] = '\0';
     lv_label_set_text(label_, text);
     ++update_count_;
+    // 2026-09-12: two rounds of trying to make label_ itself correctly
+    // reposition for a 2-line "Low\nBattery" string (re-align after the
+    // text change; then also forcing lv_obj_update_layout() first) both
+    // failed identical-looking on real hardware — the top line stayed
+    // clipped either way. Rather than keep guessing at label_'s
+    // auto-sizing/realign timing (called every tick for ordinary
+    // single-line digits, so not a place to keep bolting on speculative
+    // fixes anyway), the low-battery screen was changed to not need
+    // multi-line primary text at all — see AppController's low-battery
+    // branch, which now splits "Low"/"Battery" across secondary_label_
+    // and label_ instead, both already single-line and already proven to
+    // position correctly. This function is back to exactly what it was
+    // before that detour.
 }
 
 void GuiManager::SetSecondaryText(const char* text)

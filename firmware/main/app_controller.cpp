@@ -63,6 +63,39 @@ constexpr uint32_t kIdleFadeToDimMs = 3 * 1000;
 constexpr uint32_t kIdleDimHoldMs = 5 * 1000;
 constexpr uint32_t kIdleSleepThresholdMs = kIdlePreDimHoldMs + kIdleFadeToDimMs + kIdleDimHoldMs;  // ~18s total
 
+// Same shape as UpdateBrightness()'s paused-idle fade, just pulled out
+// into its own function (2026-09-11) so the low-battery warning screen
+// (design note 11) can drive an identical curve off its own
+// low_battery_idle_elapsed_ms_ counter without copy-pasting the math.
+// idle_elapsed_ms >= kIdleSleepThresholdMs is the cue for the caller to
+// also treat this as "ready for idle sleep" (ShouldEnterIdleSleep()) —
+// this function only reports the brightness that state implies, 0.0f.
+float IdleBrightnessCurve(uint32_t idle_elapsed_ms)
+{
+    if (idle_elapsed_ms >= kIdleSleepThresholdMs) {
+        return 0.0f;
+    }
+    if (idle_elapsed_ms >= kIdlePreDimHoldMs) {
+        const uint32_t fade_elapsed_ms = idle_elapsed_ms - kIdlePreDimHoldMs;
+        const float t = static_cast<float>(fade_elapsed_ms) / static_cast<float>(kIdleFadeToDimMs);
+        const float clamped_t = t < 1.0f ? t : 1.0f;
+        return 1.0f + clamped_t * (kDimmedBrightness - 1.0f);
+    }
+    return 1.0f;
+}
+
+// Low-battery warning screen (2026-09-11) — see app_controller.hpp design
+// note 11. Hysteresis pair, same enter-high/exit-lower shape as
+// AttitudeEstimator's kAzInvalidEnterThresholdG/kAzValidReturnThresholdG —
+// avoids flip-flopping right at a boundary voltage. Both starting
+// guesses, not validated against real hardware yet: kLowBatteryEnterV
+// sits well above kBatteryEmptyV (3.0V, this file's own LiPo floor) to
+// leave real time to actually go charge before anything more drastic
+// (stage 2, forced sleep, not implemented yet) kicks in.
+constexpr float kLowBatteryEnterV = 3.3f;
+constexpr float kLowBatteryExitV = 3.4f;
+const lv_color_t kLowBatteryColor = lv_color_make(240, 150, 20);  // warning orange-amber, distinct from every TimerFace accent
+
 // See app_controller.hpp design note 6 — window after a face switch
 // during which a tap is ignored, absorbing flip-induced tap-engine
 // false triggers instead of letting them immediately start the timer.
@@ -202,14 +235,71 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
     if (showing_battery_) {
         // Underlying face keeps its own clock correct (design note 10 —
         // nothing to save/restore on the way back out), but face
-        // switching/brightness-fade/ring/render are all skipped this tick;
-        // the battery view owns the screen instead.
+        // switching/ring/render are all skipped this tick; the battery
+        // view owns the screen instead. Brightness is NOT held at 1.0f
+        // unconditionally anymore (2026-09-11, was — see design note 10's
+        // old "known gap" note): same idle-dim-then-sleep timeline as
+        // everything else, via its own battery_view_idle_elapsed_ms_
+        // counter — nothing about just holding the device tilted to read
+        // the gauge deserves an exemption from that.
         if (current_) {
             current_->onTick(dt_ms);
         }
-        gui_manager_.SetBrightness(1.0f);
+        if (attitude.is_moving) {
+            battery_view_idle_elapsed_ms_ = 0;
+        } else {
+            battery_view_idle_elapsed_ms_ += dt_ms;
+        }
+        gui_manager_.SetBrightness(IdleBrightnessCurve(battery_view_idle_elapsed_ms_));
         gui_manager_.SetRingVisible(false);
         gui_manager_.SetBatteryLevel(BatteryVoltageToFilledBlocks(battery_voltage_v_));
+        return;
+    }
+
+    UpdateLowBatteryHysteresis();
+    if (showing_low_battery_) {
+        // See design note 11 — forced "please charge" override, but NOT
+        // exempt from idle-dim-then-sleep the way showing_battery_ is
+        // (deliberately: staying fully bright while already low on
+        // charge works against the whole point of this screen).
+        //
+        // Unlike showing_battery_, current_ is NOT left running
+        // underneath — UpdateLowBatteryHysteresis() force-pauses it (via
+        // a synthetic onTap()) the instant this mode is entered, and
+        // OnTap() swallows every tap while showing_low_battery_ stays
+        // true, so it can't be resumed until this clears. Still calling
+        // onTick() here regardless — harmless (every face's onTick() no-ops
+        // while its own running_ is false) and keeps e.g. BreathFace's
+        // done-caption countdown, which ticks unconditionally, correct.
+        if (current_) {
+            current_->onTick(dt_ms);
+        }
+        if (attitude.is_moving) {
+            low_battery_idle_elapsed_ms_ = 0;
+        } else {
+            low_battery_idle_elapsed_ms_ += dt_ms;
+        }
+        gui_manager_.SetBrightness(IdleBrightnessCurve(low_battery_idle_elapsed_ms_));
+        gui_manager_.SetRingVisible(false);
+        gui_manager_.SetAccentColor(kLowBatteryColor);
+        gui_manager_.SetPrimaryTextOpacity(255);  // undo whatever face was mid-fade when this screen took over
+        // "Low" / "Battery" split across secondary_label_/label_ (small
+        // subtitle + large primary word), not "Charge" (2026-09-12) — a
+        // single "Low Battery" line at the primary font's 40px bold size
+        // would likely run wider than the panel's usable chord, and
+        // "Low\nBattery" as one 2-line primary string (tried first, same
+        // day) hit a real bug instead: label_'s auto-sized height grows
+        // for the extra line but its position doesn't reliably follow
+        // (see GuiManager::SetPrimaryText()'s comment for the two failed
+        // fix attempts) — confirmed clipped on real hardware. Splitting
+        // across the two labels sidesteps that entirely: both stay
+        // single-line, exactly like every other face already uses them
+        // (a small top subtitle + a large bottom word/number — same
+        // pattern as BreathFace's "Inhale"/"Hold"/"Exhale" above its
+        // countdown), so nothing here depends on multi-line label sizing
+        // working correctly.
+        gui_manager_.SetSecondaryText("Low");
+        gui_manager_.SetPrimaryText("Battery");
         return;
     }
 
@@ -340,22 +430,11 @@ void AppController::UpdateBrightness(uint32_t dt_ms, bool is_moving)
         // begins next tick, not this one.
     } else {
         paused_elapsed_ms_ += dt_ms;
-        if (paused_elapsed_ms_ >= kIdleSleepThresholdMs) {
-            // Full ~18s sequence has played out and we're handing off to
-            // RunIdleSleep() this same tick (main.cpp checks
-            // ShouldEnterIdleSleep() right after this call returns) — cut
-            // the rest of the way to fully off.
-            brightness_ = 0.0f;
-        } else if (paused_elapsed_ms_ >= kIdlePreDimHoldMs) {
-            // Same shape as the running-branch fade above (linear t,
-            // clamped at 1), just faster and heading to kDimmedBrightness
-            // over kIdleFadeToDimMs, then held there (t stays clamped at 1)
-            // through kIdleDimHoldMs until the branch above takes over.
-            const uint32_t fade_elapsed_ms = paused_elapsed_ms_ - kIdlePreDimHoldMs;
-            const float t = static_cast<float>(fade_elapsed_ms) / static_cast<float>(kIdleFadeToDimMs);
-            const float clamped_t = t < 1.0f ? t : 1.0f;
-            brightness_ = 1.0f + clamped_t * (kDimmedBrightness - 1.0f);
-        }
+        // Full ~18s sequence culminating in 0.0f is also the cue that
+        // we're handing off to RunIdleSleep() this same tick (main.cpp
+        // checks ShouldEnterIdleSleep() right after this call returns) —
+        // see IdleBrightnessCurve()'s own comment.
+        brightness_ = IdleBrightnessCurve(paused_elapsed_ms_);
     }
 
     gui_manager_.SetBrightness(brightness_);
@@ -367,12 +446,16 @@ void AppController::UpdateBrightness(uint32_t dt_ms, bool is_moving)
 
 bool AppController::ShouldEnterIdleSleep() const
 {
-    return paused_elapsed_ms_ >= kIdleSleepThresholdMs;
+    return paused_elapsed_ms_ >= kIdleSleepThresholdMs ||
+           (showing_low_battery_ && low_battery_idle_elapsed_ms_ >= kIdleSleepThresholdMs) ||
+           (showing_battery_ && battery_view_idle_elapsed_ms_ >= kIdleSleepThresholdMs);
 }
 
 void AppController::NotifyWokeFromIdleSleep()
 {
     paused_elapsed_ms_ = 0;
+    low_battery_idle_elapsed_ms_ = 0;
+    battery_view_idle_elapsed_ms_ = 0;
     brightness_ = 1.0f;
     gui_manager_.SetBrightness(brightness_);
 }
@@ -451,7 +534,22 @@ void AppController::UpdateRing(uint32_t dt_ms)
 void AppController::OnTap()
 {
     if (showing_battery_) {
-        return;  // see design note 10 — ignore taps while checking battery
+        // See design note 10 — a tap still doesn't reach the underlying
+        // face while checking battery, but (2026-09-11) does count as
+        // "paying attention" for this view's own idle timer, same
+        // reasoning as showing_low_battery_ just below.
+        battery_view_idle_elapsed_ms_ = 0;
+        return;
+    }
+    if (showing_low_battery_) {
+        // See design note 11 — a tap counts as "paying attention to the
+        // warning" (resets the idle timer, same as attitude.is_moving in
+        // Update()) but is swallowed here rather than forwarded to
+        // current_->onTap(), same reasoning as design note 9's wake-tap
+        // handling: don't let an incidental tap on the warning screen
+        // silently start/pause whatever's hidden underneath.
+        low_battery_idle_elapsed_ms_ = 0;
+        return;
     }
     if (tap_mute_remaining_ms_ > 0) {
         return;  // see design note 6 — absorbing a flip's residual vibration
@@ -475,6 +573,7 @@ void AppController::UpdateBatteryView(const AttitudeEstimator::Output& attitude,
             if (battery_view_hold_ms_ >= kBatteryViewEnterMs) {
                 showing_battery_ = true;
                 battery_view_hold_ms_ = 0;
+                battery_view_idle_elapsed_ms_ = 0;  // fresh bright-then-dim cycle starting now
                 gui_manager_.ShowBatteryView(true);
             }
         } else {
@@ -490,6 +589,42 @@ void AppController::UpdateBatteryView(const AttitudeEstimator::Output& attitude,
             }
         } else {
             battery_view_hold_ms_ = 0;
+        }
+    }
+}
+
+void AppController::UpdateLowBatteryHysteresis()
+{
+    // See design note 11 — plain two-threshold hysteresis, no hold timer
+    // (unlike UpdateBatteryView() above): voltage doesn't bounce on its
+    // own the way a gesture's in_valid_plane does, so there's nothing to
+    // debounce beyond the enter/exit gap itself.
+    if (showing_low_battery_) {
+        if (battery_voltage_v_ >= kLowBatteryExitV) {
+            showing_low_battery_ = false;
+        }
+    } else {
+        if (battery_voltage_v_ < kLowBatteryEnterV) {
+            showing_low_battery_ = true;
+            low_battery_idle_elapsed_ms_ = 0;  // fresh bright-then-dim cycle starting now
+
+            // Force-pause a running timer rather than leaving it ticking
+            // silently underneath (2026-09-11, user's explicit ask — a
+            // low-battery warning shouldn't let a session keep quietly
+            // burning charge behind it). Every face's onTap() while its
+            // own running_ is true means "pause" by their shared
+            // convention (see e.g. PomodoroFace::onTap()'s comment), so a
+            // single synthetic tap here reuses each face's own correct
+            // pause logic instead of needing a new virtual method on
+            // TimerFace just for this. Only fires while genuinely
+            // running — calling this on an already-paused face would
+            // incorrectly *start* it instead (the same onTap() toggles
+            // both directions). OnTap() (see there) swallows every real
+            // tap while showing_low_battery_ stays true, so this can't be
+            // resumed by tapping until the warning clears.
+            if (current_ && current_->GetStatus().is_running) {
+                current_->onTap();
+            }
         }
     }
 }
