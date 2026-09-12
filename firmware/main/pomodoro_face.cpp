@@ -6,12 +6,10 @@
 #include "gui_manager.hpp"
 
 namespace {
-// Accent colors (2026-08-25 "UI polish" pass): focus=red, break=green — the
-// primary text dropped its "Focus"/"Break" word prefix in favor of color
-// alone carrying that distinction, applied to both the label and the
-// outer ring via GuiManager::SetAccentColor().
+// Focus=red, break=green — carries the phase distinction on its own,
+// applied to both the label and the outer ring via SetAccentColor().
 const lv_color_t kColorFocus = lv_color_make(255, 60, 60);
-const lv_color_t kColorBreak = lv_color_make(35, 150, 65);  // darker than the initial pick, 2026-08-25
+const lv_color_t kColorBreak = lv_color_make(35, 150, 65);
 
 // See pomodoro_face.hpp's transition_remaining_ms_ comment.
 constexpr uint32_t kTransitionMs = 2500;
@@ -86,13 +84,8 @@ void PomodoroFace::render(GuiManager& gui)
     gui.SetSecondaryText("");
 
     if (transition_remaining_ms_ > 0) {
-        // Fade the caption itself in and back out over the window instead
-        // of popping it in as flat text — a plain swap read as too abrupt
-        // next to the ring's smooth breathing (2026-08-26, caught on
-        // hardware). One sine hump across the whole window: 0 at the
-        // first frame (elapsed=0), peaks at the midpoint, back to 0 on
-        // the last frame right before render() falls through to the
-        // numeric display below.
+        // Fade the caption in and back out (one sine hump across the
+        // window) rather than popping it in as flat text.
         constexpr float kPi = 3.14159265359f;
         const uint32_t elapsed_ms = kTransitionMs - transition_remaining_ms_;
         const float t = static_cast<float>(elapsed_ms) / static_cast<float>(kTransitionMs);

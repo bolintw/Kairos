@@ -27,142 +27,58 @@
 namespace {
 
 constexpr int kLvglTickPeriodMs = 5;
-// 20 -> 60 rows (2026-09-06), and split into two buffers instead of one —
-// enables LVGL's double-buffered partial mode: while chunk N is being
-// DMA'd out over SPI (lvgl_flush_cb, pushImageDMA), LVGL renders chunk
-// N+1 into the other buffer instead of waiting. Room freed by
-// CONFIG_LV_MEM_SIZE_KILOBYTES 256->128 (see that config's sdkconfig
-// comment) — two 60-row RGB565 buffers are 240*60*2*2 = 57.6KB, well
-// under the ~51KB single worst-case rotation buffer this pool already had
-// to fit (gui_manager.hpp's kRootWidthPx*kRootHeightPx*4 note) at half
-// the total pool size.
+// Two draw buffers enable LVGL's double-buffered partial mode: while
+// chunk N is being DMA'd out over SPI, LVGL renders chunk N+1 into the
+// other buffer instead of waiting.
 constexpr int kDrawBufRows = 60;
-// 150ms -> 30ms -> 120Hz (2026-08-25): raised again so a future low-pass
-// filter on the raw gyro/accel samples has real headroom above both the
-// display's ~60fps redraw cap and its own filter bandwidth — sampling
-// faster than what you filter/display is the sane order, not the other
-// way round. QMI8658's own ODR is 1000Hz (see qmi8658.hpp), and the I2C
-// read itself (~13 bytes @ 400kHz) is well under a millisecond, so 120Hz
-// polling has plenty of room in the 5ms main-loop cadence. dt_ms-based
-// timing elsewhere (AttitudeEstimator, AppController) is unaffected by
-// the rate itself, just gets finer-grained inputs — EXCEPT the
-// complementary filter's alpha: BlendTowardAngle() absorbs a fixed
-// *fraction* of the gyro/accel gap per call, not per unit time, so more
-// calls/sec at the same alpha=0.9 means faster real-time convergence
-// toward the accel reading than what 0.9 was tuned to feel like at the
-// old 30ms rate. Worth re-checking the settle "feel" on hardware after
-// this change — may want to nudge alpha up to compensate.
+// Sampling faster than what's filtered/displayed leaves headroom for the
+// low-pass filters above the display's ~60fps cap. QMI8658's own ODR is
+// 1000Hz and the I2C read itself is well under a millisecond, so 120Hz
+// polling fits comfortably in the 5ms main-loop cadence.
 constexpr int64_t kSensorUpdatePeriodUs = 1000000 / 120;  // ~120Hz
 
-// A voltage reading has no reason to be as fresh as attitude — the
-// battery doesn't change meaningfully within a second, and
-// BatteryMonitor::ReadVoltage() already blocks for kNumSamples (32) raw
-// ADC reads per call, no benefit to calling it any more often than this.
-// 1s -> 10s (2026-09-12, user's own observation: the device now runs
-// 5+ hours per charge, so 1Hz was needlessly frequent). Not really a
-// power lever either way — the ADC read itself (32 samples, a few ms)
-// costs very little — this is about matching the poll rate to how slowly
-// voltage actually moves (minutes-scale drift, per this project's own
-// real discharge-curve data) without making the on-screen Bat readout or
-// the low-battery threshold detection feel noticeably laggy. Landed
-// short of 30-60s for that reason.
+// A voltage reading has no reason to be as fresh as attitude — voltage
+// drifts on a minutes scale, and BatteryMonitor::ReadVoltage() already
+// blocks for kNumSamples (32) raw ADC reads per call.
 constexpr int64_t kBatteryReadPeriodUs = 10 * 1000000;  // 0.1Hz
 
-// Stage 2 of the low-battery safety net (2026-09-12) — see
-// app_controller.hpp design note 11 for stage 1 (the warning screen,
-// which handles down to kLowBatteryEnterV). Below this second, lower
-// threshold, refuse to keep running at all: forced deep sleep instead of
-// the normal light-sleep+WoM loop — see the idle-sleep block below and
-// kInCriticalBatterySleep's comment for the full mechanism. Enter is
-// AppController::kCriticalBatteryEnterV (3.0V, per the user's own earlier
-// research — gravity_timer_project_plan.md's M9 notes, 1S LiPo discharge
-// floor ~3.0V), NOT a second copy of the literal here — AppController
-// needs the exact same number for design note 11's "countdown can't be
-// reset once critical" rule, and the two must never drift apart from each
-// other, so this file reads that one instead of keeping its own.
-// 3.2f -> 3.8f (2026-09-12, before this was ever flashed for a real
-// deep-discharge test): the user's own observation from watching this
-// battery charge — terminal voltage jumps up a real, visible step the
-// *instant* charging current starts flowing, well before any meaningful
-// capacity has actually gone back in. That's internal resistance, not
-// state of charge: while current I flows into (or out of) a cell, the
-// terminal voltage you can measure is the true open-circuit voltage
-// plus/minus I*R_internal, not the open-circuit voltage itself — and a
-// cell already suspected of being degraded (this project's own "1000mAh"
-// battery turned out closer to ~415mAh real capacity, a likely sign of
-// exactly this kind of degradation) can have a notably higher internal
-// resistance than a healthy one, making the jump bigger, not smaller,
-// right when it matters most. A narrow 3.0/3.2V gap risks reading that
-// transient IR bump alone as "recovered" and resuming full active
-// operation — screen on, sensor loop running, ~70-90mA — while the
-// battery's *real* stored energy has barely moved, right back toward the
-// same critical voltage under that load. 3.8V is far enough above 3.0V
-// that no plausible IR jump alone gets there; reaching it means real
-// charge has actually gone back in.
+// Stage 2 of the low-battery safety net — see app_controller.hpp design
+// note 11 for stage 1 (the warning screen, down to kLowBatteryEnterV).
+// Below this second, lower threshold, refuse to keep running at all:
+// forced deep sleep instead of the normal light-sleep+WoM loop — see the
+// idle-sleep block below. Enter threshold is
+// AppController::kCriticalBatteryEnterV (3.0V), read from there rather
+// than duplicated here so the two constants can't drift apart.
+//
+// Exit threshold is set far above entry (3.8V, not e.g. 3.2V) because a
+// LiPo's terminal voltage jumps up a real step the instant charging
+// current starts flowing, before any meaningful capacity has gone back
+// in (internal-resistance IR drop, not state of charge — and a degraded
+// cell's higher internal resistance makes this jump bigger, not
+// smaller). A narrow gap risks reading that transient alone as
+// "recovered" and resuming full active operation while the battery's
+// real stored energy has barely moved.
 constexpr float kCriticalBatteryExitV = 3.8f;
-// Deep sleep current is tiny (~8uA) next to even a brief active-boot
-// check, so this can afford to be fairly frequent without much power
-// cost — 30s balances noticing a just-started charge reasonably promptly
-// against not re-booting excessively often. Starting guess, not tuned.
+// Deep sleep current is tiny (~8uA) next to a brief active-boot check,
+// so this can afford to be fairly frequent.
 constexpr uint64_t kCriticalBatteryCheckPeriodUs = 30ULL * 1000 * 1000;
 
-// Flip to false to hide the debug overlay entirely (angle/taps/is_moving
-// label at the top) without deleting the code — flip back on when
-// debugging attitude/tap behavior again. Tied to the shared kDebugEnabled
-// (debug_config.hpp, 2026-09-12) rather than its own independent literal
-// now — see that header's comment for why this one specifically groups
-// with the sleep/wake/tap serial logs.
-//
-// Briefly tested false 2026-09-06 to check whether this label (the one
-// piece of on-screen text that bypasses GuiManager's dirty-check —
-// lv_label_set_text_fmt() called unconditionally every sensor tick, right
-// below) was behind flush_calls=143/s at rest seen in a main-loop timing
-// breakdown. It wasn't — flush_calls barely dropped (143->110) with the
-// label off, same ~11-chunks-per-tick ratio either way. Real cause turned
-// out to be root_'s rotation redraw (see GuiManager::SetRotationDeg's
-// comment) — fixed there instead, so this stays on.
+// Hides the debug overlay (angle/taps/is_moving label) without deleting
+// the code.
 constexpr bool kDebugOverlayEnabled = kDebugEnabled;
 
-// Temporary diagnostic: one live "ATT," CSV line per sensor tick with
-// AttitudeEstimator's gyro-only angle, accel-only angle, fused angle, and
-// gz (see attitude_estimator.hpp's Output::debug_* fields) — plain
-// printf, no buffering.
-//
-// History (2026-09-06): briefly went through a RAM-ring-buffer-then-dump
-// version instead, on the theory that live per-tick printf's blocking
-// console UART I/O was itself throttling the sensor loop down to ~10Hz
-// (real hardware showed consecutive ATT rows 80-140ms apart instead of
-// the intended ~8.3ms/120Hz). Root-caused with kLoopTimingLogEnabled
-// instead: the throttling turned out to be root_'s rotation redraw (see
-// GuiManager::SetRotationDeg's comment), not this logging — the buffered
-// version showed the exact same ~10Hz rate, which is what proved that.
-// Once printf itself was cleared, the extra ring-buffer/dump-on-settle
-// complexity (and its own side effect, a multi-second stutter every time
-// it dumps) stopped earning its cost. Back to the simple version; revisit
-// the buffered approach only if something *else* turns out to need
-// hiding I/O from the timing-critical window again.
-//
-// false -> true -> false (2026-09-08): re-enabled 2026-09-07 to recollect
-// an angle graph and confirm the rotation feel's numbers looked as good
-// as they felt (they did — see gravity_timer_project_plan.md's M8/M9
-// notes, including the ±512dps gyro-range follow-up that graph itself
-// motivated). Attitude tracking itself isn't under active investigation
-// anymore, so back off — flip back to true if it needs watching again.
+// One live "ATT," CSV line per sensor tick with AttitudeEstimator's
+// gyro-only angle, accel-only angle, fused angle, and gz.
 constexpr bool kAttitudeDebugLogEnabled = false;
 
 // Hold BOOT (GPIO0) this long, while the app is already running, to enter
 // calibration mode. NOT checked at power-on/reset — see calibration_mode.hpp.
 constexpr int64_t kCalibrationHoldUs = 3 * 1000 * 1000;
 
-// Tap Engine config (M4's starting point, see qmi8658.hpp's
-// ConfigureTap() for what each parameter means). Hoisted to named
-// constants 2026-09-06 (previously inline literals only in the boot-time
-// call below) mainly for self-documentation now — M9's idle-sleep path
-// (Qmi8658::SetLowPowerAccelOnly()) deliberately leaves the accel ODR
-// these were tuned against unchanged, so these same values keep applying
-// whether or not gyro is currently enabled; no separate sleep-mode
-// tap config needed (see that method's comment for why an earlier
-// attempt at one broke tap detection outright).
+// Tap Engine config — see qmi8658.hpp's ConfigureTap() for what each
+// parameter means. The idle-sleep path (Qmi8658::SetLowPowerAccelOnly())
+// deliberately leaves the accel ODR these were tuned against unchanged,
+// so these same values keep applying whether or not gyro is enabled.
 constexpr uint8_t kTapPriority = 0;
 constexpr uint8_t kTapPeakWindow = 40;
 constexpr uint16_t kTapTapWindow = 100;
@@ -172,100 +88,36 @@ constexpr float kTapGamma = 0.25f;
 constexpr float kTapPeakMagThr = 0.8f;
 constexpr float kTapUdmThr = 0.4f;
 
-// Wake-on-Motion config for M9 idle sleep (2026-09-06, wom-wake-mode
-// branch — see qmi8658.hpp's EnterWakeOnMotion() for the full rationale
-// vs. the tap-engine-based approach this replaces).
-//   - kWomThresholdMg: 1mg/LSB per this datasheet — not independently
-//     re-derived, but at least not contradicted by lewisxhe/SensorLib's
-//     own configWakeOnMotion(), which writes this same raw byte straight
-//     through with no unit conversion, default WoMThreshold=200 — so 200
-//     is that library's own idea of a normal, general-purpose setting,
-//     not a conservative floor. 8-bit register, max 255 either way: the
-//     hardware's whole available range, not an arbitrary cap — not much
-//     headroom left regardless of where it's set within it. 125mg
-//     (2026-09-06 starting guess) confirmed working end-to-end on
-//     hardware 2026-09-07 (real ESP_SLEEP_WAKEUP_GPIO wake, cause=7), but
-//     way oversensitive — an incidental hand bump woke it. 220mg, one
-//     step later, same result. Now at the register's actual ceiling
-//     (255mg) as the last data point this axis alone can give — being
-//     this close to SensorLib's own "normal" default the whole time
-//     suggests the chip's WoM is just inherently this sensitive by
-//     design (matches EnterWakeOnMotion()'s own already-documented
-//     trade-off: wakes on any sufficiently large accelerometer slope, not
-//     specifically a deliberate tap). Register maxed out at this point —
-//     the two-stage-wake constants just below are the software-side
-//     filter that turned out to be needed on top of it.
-//   - kWomBlankingSamples: 6-bit field, max 63 (~63ms at the 1000Hz accel
-//     ODR CTRL2 is already configured for). Set to the max as a
-//     conservative starting point, on the theory that entering WoM mode
-//     toggles CTRL7 the same way entering accel-only mode did, and that
-//     toggle reliably produced a spurious STATUS1 latch there (see
-//     qmi8658.hpp's SetLowPowerAccelOnly() history) — not yet confirmed
-//     WoM's own built-in blanking window is enough to absorb an
-//     analogous transient on its own; the discard loop below is a second
-//     layer of defense either way.
+// Wake-on-Motion config for idle sleep — see qmi8658.hpp's
+// EnterWakeOnMotion(). kWomThresholdMg is maxed out at the register's
+// 255 ceiling — even there, WoM wakes on any sufficiently large
+// accelerometer slope, not specifically a deliberate tap (see that
+// method's trade-off note), which is why the two-stage confirm below
+// exists as a software-side filter on top. kWomBlankingSamples is also
+// maxed (6-bit field, max 63, ~63ms at 1000Hz accel ODR) to absorb the
+// transient STATUS1 latch that toggling CTRL7 on mode entry can cause.
 constexpr uint8_t kWomThresholdMg = 255;
 constexpr uint8_t kWomBlankingSamples = 63;
 
-// Two-stage WoM wake confirmation (2026-09-07) — see the idle-sleep
-// block's own comment for the full rationale. This is a deliberate
-// double-tap-to-wake gesture, not just a debounce: on real hardware, a
-// single physical tap only ever registers on whichever detector is
-// active at that instant (WoM here, since the tap engine isn't running
-// during light sleep), so this window doesn't catch the *same* tap's
-// tail end — it waits for a genuinely separate, second tap. 500ms
-// (2026-09-07, was 1000ms) was landed on after hands-on bare-board
-// testing, flagged then as "not yet re-tested against the finished
-// enclosure/battery, may still move" — it did: 2026-09-11, inside the
-// enclosure, the user reported needing ~4 taps instead of 2 despite using
-// the same tapping method that still reliably registers as a normal
-// pause/resume tap during regular operation (ruling out the tap engine's
-// own thresholds, kTapPeakMagThr/kTapUdmThr, as the cause — those are
-// clearly still sensitive enough). Widened to 1500ms as the first thing
-// to try, on the hypothesis that the window itself just wasn't long
-// enough for a natural two-tap rhythm. Confirmed correct on hardware the
-// same day, both bare-board and (the real test) inside the finished
-// enclosure — two taps wake it reliably again, at a force that still
-// doesn't feel accident-prone. kWomConfirmLatencyLogEnabled below was
-// added alongside this to check a competing hypothesis (slow
-// WoM-to-tap-engine transition) — it measured only ~13.45ms on real
-// hardware, ruling that out; the window length was the whole story.
-// kWomConfirmPollMs matches the poll cadence already used elsewhere in
-// this same function's WoM-entry discard loop.
+// Two-stage WoM wake confirmation — see the idle-sleep block's own
+// comment. A deliberate double-tap-to-wake gesture, not just a debounce:
+// a single physical tap only ever registers on whichever detector is
+// active at that instant (WoM, since the tap engine isn't running during
+// light sleep), so this window waits for a genuinely separate second
+// tap. 1500ms gives a natural two-tap rhythm enough room, confirmed
+// reliable both bare-board and inside the finished enclosure.
 constexpr int kWomConfirmWindowMs = 1500;
 constexpr int kWomConfirmPollMs = 20;
 
-// Measures and logs the real elapsed time from RunIdleSleep() returning
-// (a WoM trigger confirmed) to the confirm-window poll loop actually
-// starting — i.e. the cost of ExitWakeOnMotion()+ConfigureTap()+the
-// spurious-latch discard, all real I2C command handshakes
-// (WriteCommandAndWait() in qmi8658.hpp polls a status bit rather than
-// being instant). Added 2026-09-11 to test whether this transition was a
-// meaningful fraction of the confirm window above, instead of guessing —
-// measured ~13.45ms on real hardware, small enough to rule out as the
-// cause of the enclosure wake-reliability issue (see
-// kWomConfirmWindowMs's comment for what the actual cause turned out to
-// be). Tied to the shared kDebugEnabled (debug_config.hpp, 2026-09-12)
-// now that the immediate mystery it was added for is resolved — cheap
-// enough to leave wired up for next time, just not printing by default.
+// Measures the real elapsed time from RunIdleSleep() returning to the
+// confirm-window poll loop starting — the cost of
+// ExitWakeOnMotion()+ConfigureTap()+the spurious-latch discard.
 constexpr bool kWomConfirmLatencyLogEnabled = kDebugEnabled;
 
 static LGFX lcd;
-// Two buffers now (2026-09-06, was one) — see lvgl_flush_cb()'s
-// pushImageDMA()/waitDMA() comment for why.
 static uint8_t lvgl_draw_buf1[240 * kDrawBufRows * 2];  // RGB565, 2 bytes/px
 static uint8_t lvgl_draw_buf2[240 * kDrawBufRows * 2];
 
-// Temporary diagnostic (2026-09-06) — see kLoopTimingLogEnabled's comment
-// in app_main(): the LOOP,... breakdown showed lv_timer_handler() eating
-// ~96% of every second, *even while GuiManager's own dirty-checks were
-// reporting ~0 real content changes*, which points away from the SPI
-// flush itself (nothing to flush if nothing's dirty) and toward something
-// else inside LVGL's per-call processing. Counting/timing pushImage()
-// calls specifically (file-scope so the flush callback and app_main()'s
-// print loop can both reach them) is the next cut: if flush_call_count
-// stays near 0 while lvgl_us stays near 74ms/call anyway, that rules out
-// the SPI write path entirely.
 int64_t g_lvgl_flush_accum_us = 0;
 uint32_t g_lvgl_flush_call_count = 0;
 
@@ -275,23 +127,15 @@ void lvgl_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
     const int32_t h = area->y2 - area->y1 + 1;
     const int64_t flush_start_us = esp_timer_get_time();
     // Display is configured LV_COLOR_FORMAT_RGB565_SWAPPED to match the
-    // byte order pushImage() expects — see the color format comment
-    // where the display is created.
+    // byte order pushImage() expects.
     //
-    // pushImageDMA() + waitDMA() (2026-09-06, was a single blocking
-    // pushImage() call) — with two draw buffers now passed to
-    // lv_display_set_buffers(), LVGL alternates between them each flush,
-    // so while this chunk's bytes are still going out over SPI in the
-    // background, LVGL can render the *next* chunk into the other buffer
-    // instead of blocking on this one. waitDMA() at the top (not the
-    // bottom) is what makes this safe on a single SPI bus: it blocks only
-    // if the *previous* async transfer hasn't finished yet (normally
-    // already done, since a render pass takes real time too), never on
-    // this call's own transfer — that's queued and left running via
-    // pushImageDMA(), collected by the next call's waitDMA() instead of
-    // this one's. flush_us below now measures queueing time, not full
-    // transfer time — expect it to look much smaller than before, that's
-    // the point of overlapping the two.
+    // pushImageDMA() + waitDMA(): with two draw buffers, LVGL alternates
+    // between them each flush, so while this chunk's bytes are still
+    // going out over SPI, LVGL can render the next chunk into the other
+    // buffer instead of blocking. waitDMA() at the top, not the bottom,
+    // blocks only on the *previous* transfer if it hasn't finished yet —
+    // this call's own transfer is left running and collected by the next
+    // call's waitDMA() instead.
     lcd.waitDMA();
     lcd.pushImageDMA(area->x1, area->y1, w, h, reinterpret_cast<uint16_t*>(px_map));
     g_lvgl_flush_accum_us += esp_timer_get_time() - flush_start_us;
@@ -344,41 +188,11 @@ AttitudeEstimator::Sample ToAttitudeSample(const Qmi8658::Sample& s)
     return out;
 }
 
-// Temporary diagnostic (2026-09-07, wom-wake-mode branch) — round 1
-// watched only IMU_INT2/GPIO48 (the pin CAL1_H's interrupt-select field
-// was written to choose, per Table 39: bits[7:6]="01" -> "INT2 with
-// initial value 0") and captured *zero* edges across 5 real taps, even
-// though STATUS1.WoM did latch to 1 by the end (read via the
-// post-test PollTapEvent() discard call) — so the chip genuinely
-// detected motion, but nothing toggled on GPIO48 at all. That rules out
-// the original toggle-parity theory (which predicted *some* edges,
-// landing on either level) and points somewhere else — the two live
-// candidates now: (a) the CAL1_H bit encoding is backwards from what's
-// intended here and the interrupt actually went to IMU_INT1/GPIO47
-// instead, or (b) the CTRL9 WRITE_WOM_SETTING handshake silently didn't
-// take (WriteCommandAndWait()'s return value was never checked). Round 2
-// watches *both* IMU_INT1 (GPIO47) and IMU_INT2 (GPIO48) simultaneously
-// to settle (a) directly, and qmi8658.hpp's EnterWakeOnMotion() now
-// prints if the CTRL9 handshake reports failure, to check (b) too.
-//
-// Otherwise unchanged from round 1: switches the IMU into WoM mode for
-// kWomEdgeTestDurationMs, watches both pins with plain edge-triggered
-// ISRs (GPIO_INTR_ANYEDGE) logging each transition's pin/level/timestamp
-// to a fixed-size buffer, then dumps it and restores the tap engine.
-// Still deliberately not touching gpio_wakeup_enable()/
-// esp_sleep_enable_gpio_wakeup() or reading STATUS1 mid-window — see
-// round 1's reasoning above, unchanged.
-//
-// RESOLVED (2026-09-07) — round 2's actual root cause turned out to be
-// neither (a) nor (b) above: CTRL1.bit3/bit4 (INT1_EN/INT2_EN, see
-// qmi8658.hpp's constructor comment) were never set, so both INT pins
-// were high-Z the whole time regardless of anything WoM-config-related.
-// With that fixed (plus CAL1_H reverted to its original 0x40 — round 5's
-// 0x80 guess turned out to have not been the issue either), this same
-// test captured 107 real edges on GPIO48 across 5 taps. Test kept in the
-// codebase (still useful if WoM ever needs re-diagnosing) but switched
-// off by default now that the mystery it was built for is solved — see
-// RunIdleSleep()'s actual sleep/wake path below for the real feature.
+// Diagnostic, off by default: switches the IMU into WoM mode for
+// kWomEdgeTestDurationMs, watches both IMU_INT1/IMU_INT2 with plain
+// edge-triggered ISRs, and dumps every transition's pin/level/timestamp —
+// useful if WoM ever needs re-diagnosing (see RunIdleSleep() for the
+// actual sleep/wake path in normal operation).
 constexpr bool kRunWomEdgeTestOnBoot = false;
 constexpr gpio_num_t kWomEdgeTestInt1Gpio = GPIO_NUM_47;
 constexpr gpio_num_t kWomEdgeTestInt2Gpio = GPIO_NUM_48;
@@ -448,31 +262,21 @@ extern "C" void app_main(void)
 {
     // GPIO0 (BOOT) as a normal input once past the ROM bootloader's
     // strapping check — see calibration_mode.hpp for why this is only
-    // polled here, not checked at reset. Moved to the very top (2026-09-12,
-    // was further down, after NVS/calibration init) so the critical-battery
-    // escape hatch just below can share this one config call instead of
-    // needing its own.
+    // polled here, not checked at reset. Configured before the
+    // critical-battery escape hatch below so it can share this call.
     gpio_config_t boot_btn_cfg = {};
     boot_btn_cfg.pin_bit_mask = 1ULL << GPIO_NUM_0;
     boot_btn_cfg.mode = GPIO_MODE_INPUT;
     boot_btn_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
     gpio_config(&boot_btn_cfg);
 
-    // Stage 2's periodic recheck (2026-09-12) — see kCriticalBatteryEnterV's
-    // comment for the policy and the idle-sleep block below for where this
-    // flag gets set true. Checked as the very first real thing in
-    // app_main(), before any of the heavier LCD/LVGL/IMU init below: deep
-    // sleep, unlike every other sleep path in this project, is a full
-    // reboot, not a resume — app_main() runs again from scratch, and RTC
-    // memory (this flag's storage class) is the only thing that survives
-    // it. That's *why* this flag exists: it's how a fresh boot tells "was
-    // I woken specifically to re-check a critical battery voltage, or is
-    // this a normal boot" apart, before committing to either path. Kept
-    // deliberately minimal when it IS a recheck — just enough to read the
-    // ADC and decide whether to go straight back to sleep — so each
-    // periodic wake-and-recheck cycle costs as little active time (and
-    // therefore power) as possible; the full LCD/LVGL/IMU/etc. init below
-    // never runs at all for a cycle that goes back to sleep.
+    // Stage 2's periodic recheck. Deep sleep is a full reboot, not a
+    // resume — app_main() runs again from scratch, and RTC memory (this
+    // flag's storage class) is the only thing that survives it, which is
+    // how a fresh boot tells "woken to re-check critical battery" apart
+    // from a normal boot. Checked before any of the heavier LCD/LVGL/IMU
+    // init below, and kept minimal when it IS a recheck, so a cycle that
+    // goes back to sleep costs as little active time as possible.
     static RTC_DATA_ATTR bool in_critical_battery_sleep = false;
     if (in_critical_battery_sleep && esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
         // Escape hatch: hold BOOT through a wake to force a real boot
@@ -541,17 +345,6 @@ extern "C" void app_main(void)
     // swapped relative to LVGL's plain RGB565. Without this, only pure
     // black/white survive untouched; every anti-aliased/blended pixel
     // (i.e. most of any glyph's edges) comes out with a scrambled hue.
-    //
-    // Tried plain LV_COLOR_FORMAT_RGB565 + lcd.setSwapBytes(true) instead
-    // (2026-09-06), on the theory that the matrix-path crash below (see
-    // gui_manager.hpp's history) was specific to this non-default color
-    // format. It wasn't — same Guru Meditation, same
-    // lv_draw_sw_blend_color_to_rgb565 (the *non*-swapped variant this
-    // time) via draw_letter_cb/refr_obj_matrix, confirming the bug is in
-    // LVGL 9.5.0's matrix-transformed text-glyph rendering itself,
-    // independent of color format. Reverted back to this — no reason to
-    // carry the untested setSwapBytes() path once it didn't avoid the
-    // crash it was meant to avoid.
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565_SWAPPED);
     lv_display_set_buffers(disp, lvgl_draw_buf1, lvgl_draw_buf2, sizeof(lvgl_draw_buf1),
                             LV_DISPLAY_RENDER_MODE_PARTIAL);
@@ -567,17 +360,9 @@ extern "C" void app_main(void)
     esp_timer_create(&tick_timer_args, &tick_timer);
     esp_timer_start_periodic(tick_timer, kLvglTickPeriodMs * 1000);
 
-    // M9: lets RunIdleSleep()'s vTaskDelay() calls (sleep_mode.cpp) drop
-    // into real light sleep automatically via FreeRTOS tickless idle,
-    // instead of calling esp_light_sleep_start() by hand — see
-    // sleep_mode.hpp's comment for why the hand-rolled version was
-    // dropped (left the LCD permanently blank after the first sleep,
-    // with no fix found short of switching to this framework path).
-    // min_freq_mhz == max_freq_mhz deliberately disables DFS (dynamic
-    // CPU frequency scaling): see gravity_timer_project_plan.md's M9
-    // notes on the CPU-downclock experiment — even an automatic,
-    // brief drop below 160MHz measurably hurt the software
-    // screen-rotation redraw's throughput on hardware.
+    // min_freq_mhz == max_freq_mhz deliberately disables DFS (dynamic CPU
+    // frequency scaling) — even a brief automatic drop below 160MHz
+    // measurably hurt the software screen-rotation redraw's throughput.
     esp_pm_config_t pm_config = {};
     pm_config.max_freq_mhz = 160;
     pm_config.min_freq_mhz = 160;
@@ -594,17 +379,11 @@ extern "C" void app_main(void)
         printf("ATT,t_ms,gz_dps,gyro_angle,accel_angle,fused_angle,is_moving,in_valid_plane\n");
     }
 
-    // Deliberately NOT rotating with the primary label (see
-    // gui_manager.hpp's screen counter-rotation note) — stays a plain
-    // fixed child of lv_screen_active() for now, after the fully-rotating
-    // version crashed twice on hardware. Created *before* GuiManager below
-    // (2026-09-01, was after) so root_'s children end up later in
-    // lv_screen_active()'s child list and therefore draw on top of this
-    // overlay, not under it — with an unchanged order, calibration mode's
-    // two-line "Rotate\nand hold" grew tall enough to reach up into the
-    // overlay's on-screen area and the overlay (drawn later = on top)
-    // visibly cut into the top of "Rotate" (caught on hardware). Pure
-    // z-order fix, no positions/sizes changed.
+    // Deliberately not rotating with the primary label (see
+    // gui_manager.hpp's screen counter-rotation note) — a plain fixed
+    // child of lv_screen_active(). Created before GuiManager below so
+    // root_'s children end up later in lv_screen_active()'s child list
+    // and draw on top of this overlay, not under it.
     lv_obj_t* label = nullptr;
     if (kDebugOverlayEnabled) {
         label = lv_label_create(lv_screen_active());
@@ -615,19 +394,18 @@ extern "C" void app_main(void)
         lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 30);
     }
 
-    // M6: AppController owns attitude-driven face switching (via
+    // AppController owns attitude-driven face switching (via
     // AttitudeEstimator::Output, computed below) plus tap routing and
     // TimerFace lifecycle. See app_controller.hpp for the design.
     static GuiManager gui_manager(lcd);
     static AppController app_controller(gui_manager);
 
-    // M3/M4 debug overlay: raw accel/gyro readout plus tap count.
     static Qmi8658 imu(GPIO_NUM_6, GPIO_NUM_7);
 
-    // Design note 10's battery-check gesture — see battery_monitor.hpp.
+    // Battery-check gesture — see battery_monitor.hpp.
     static BatteryMonitor battery_monitor;
 
-    // M4 starting point, not a finished tune — adjust these while watching
+    // Starting point, not a finished tune — adjust these while watching
     // the tap count below and re-flashing. Windows are ported from
     // SensorLib's deprecated tap example (peak_window=20, tap_window=50,
     // d_tap_window=250, "@500Hz ODR"); doubled here since our accel ODR is
@@ -677,51 +455,24 @@ extern "C" void app_main(void)
     float last_battery_voltage_v = 0.0f;  // shown in the debug overlay below — 0 until the first real read
     int64_t boot_button_press_start_us = 0;
     int tap_count = 0;
-    // Rendering knob 1/4 (2026-09-06): antialiasing off while actively
-    // rotating, on once settled — see lv_refr.c's layer_draw_dsc.antialias
-    // (fed straight from lv_display_get_antialiasing()), which root_'s
-    // rotated redraw pays for on every blended pixel. Not worth it during
-    // a fast flip (blurriness not very noticeable while things are moving
-    // anyway); still applied once resting, so settled text looks the same
-    // as before. Dirty-checked so it's only ever set on an actual
-    // is_moving transition, not every tick.
+    // Antialiasing off while actively rotating (not worth its per-pixel
+    // cost during a fast flip), on once settled — dirty-checked so it's
+    // only set on an actual is_moving transition, not every tick.
     bool antialiasing_enabled = true;
 
     int64_t last_fps_calc_us = esp_timer_get_time();
     uint32_t fps_display = 0;
     uint32_t last_update_count = 0;
 
-    // Temporary diagnostic (2026-09-06): per-second breakdown of where
-    // main loop time actually goes. Added after the ATT capture above
-    // showed the sensor-tick block firing at only ~10Hz instead of the
-    // designed ~120Hz, *even at rest* and *even with the debug log itself
-    // reduced to near-zero-cost RAM writes* — ruling out that logging as
-    // the cause. GuiManager's on-screen FPS counter can't answer this
-    // either: it counts real *content changes* after GuiManager's own
-    // dirty-check (see its GetUpdateCount() comment below), so reading 0-1
-    // FPS at rest is that check correctly skipping redundant redraws, not
-    // evidence about loop speed — a wrong turn taken (and corrected) before
-    // adding this. loop_count directly answers "how many times did the
-    // outer while(true) actually run in the last second"; the four *_us
-    // accumulators say which section it went into.
+    // Per-second breakdown of where main loop time actually goes.
+    // loop_count answers "how many times did while(true) run in the last
+    // second"; the four *_us accumulators say which section it went into.
     //
-    // Flag layout note (2026-09-07, revised 2026-09-12) — this file has
-    // several independent debug toggles: this one, kAttitudeDebugLogEnabled,
-    // kRunWomEdgeTestOnBoot, plus the kDebugEnabled-linked group
-    // (kDebugOverlayEnabled/kWomConfirmLatencyLogEnabled here and
-    // qmi8658.hpp's kQmi8658DebugLogEnabled/sleep_mode.cpp's
-    // kSleepDebugLogEnabled — see debug_config.hpp). That group merges on
-    // purpose now: sleep/wake/tap logs plus the on-screen overlay all
-    // narrate the same story, so seeing them together (or not at all) is
-    // the useful grouping, and the overlay being on-screen UI rather than
-    // serial output means it was never part of the UART-contention concern
-    // below anyway. This one and kAttitudeDebugLogEnabled stay separate
-    // from that group and from each other: both are serial printf streams
-    // that actively compete for the same UART — turning them on together
-    // interleaves LOOP/ATT/tap/WoM/sleep lines into one stream and defeats
-    // whichever one you actually meant to read (e.g. a clean ATT-only
-    // capture for graphing, this file's kAttitudeDebugLogEnabled right
-    // above, is the reason this one is off right now). Flip only the ones
+    // This, kAttitudeDebugLogEnabled, and kRunWomEdgeTestOnBoot stay
+    // independent of the shared kDebugEnabled group (debug_config.hpp) —
+    // all of these are serial printf streams competing for the same
+    // UART, so turning several on together interleaves their output and
+    // defeats whichever one you meant to read. Flip only the one
     // relevant to what's being debugged.
     constexpr bool kLoopTimingLogEnabled = false;
     uint32_t loop_count = 0;
@@ -785,18 +536,13 @@ extern "C" void app_main(void)
             // perfectly fixed cadence (loop jitter from the blocking I2C
             // tap poll, LVGL rendering, etc.), and both the gyro
             // integration in AttitudeEstimator and AppController's
-            // onTick() need the real value or they drift, same class of
-            // bug as the earlier stopwatch timing fix.
+            // onTick() need the real value or they drift.
             //
             // Round to the nearest ms (+500 before truncating), not
-            // truncate — plain integer division here systematically
-            // discards the sub-millisecond remainder every tick (up to
-            // 999us, ~500us on average), which is a real, measured drift
-            // source: TimerFace::onTick(dt_ms) accumulates this same
-            // dt_ms directly, so the loss compounds with tick rate — a
-            // stopwatch measured ~2% slow at the old 150ms/~6.7Hz sensor
-            // rate would lose roughly 6% at the current 120Hz if left
-            // truncating (2026-08-25).
+            // truncate — plain integer division here would systematically
+            // discard the sub-millisecond remainder every tick, and
+            // TimerFace::onTick(dt_ms) accumulates this same dt_ms
+            // directly, so the loss would compound into real timer drift.
             const uint32_t sensor_dt_ms =
                 static_cast<uint32_t>((now_us - last_sensor_update_us + 500) / 1000);
             last_sensor_update_us = now_us;
@@ -825,20 +571,11 @@ extern "C" void app_main(void)
                 app_controller.Update(attitude, sensor_dt_ms);
 
                 if (app_controller.ShouldEnterIdleSleep()) {
-                    // Stage 2 of the low-battery safety net (2026-09-12) —
-                    // see kCriticalBatteryEnterV's comment and
-                    // in_critical_battery_sleep's comment at the top of
-                    // this function for the full mechanism. Checked first,
+                    // Stage 2 of the low-battery safety net, checked first
                     // ahead of the normal light-sleep+WoM path below: once
-                    // voltage is this low, don't bother with WoM/tap at
-                    // all, go straight to deep sleep and don't come back
-                    // for real (screen included) until a periodic
-                    // voltage recheck sees it recovered — a world away
-                    // from the "wake on any bump" friction this file's
-                    // other sleep path is tuned for. last_battery_voltage_v
-                    // may be a few seconds stale (kBatteryReadPeriodUs is
-                    // 1Hz) but that's immaterial next to how slowly
-                    // voltage actually moves.
+                    // voltage is this low, skip WoM/tap entirely and go
+                    // straight to deep sleep, not coming back for real
+                    // until a periodic voltage recheck sees it recovered.
                     if (last_battery_voltage_v < AppController::kCriticalBatteryEnterV) {
                         printf("CRITICAL_BATTERY_ENTER,v=%.2fV — deep sleep starting\n", last_battery_voltage_v);
                         in_critical_battery_sleep = true;
@@ -846,70 +583,35 @@ extern "C" void app_main(void)
                         esp_deep_sleep_start();  // never returns
                     }
 
-                    // tick_timer fires every kLvglTickPeriodMs (5ms) with
-                    // skip_unhandled_events=false, which floors every
-                    // idle gap FreeRTOS sees at ~5ms — below
-                    // CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP (8 ticks =
-                    // 8ms), so automatic light sleep (esp_pm_configure()
-                    // above) would never see a long enough gap to engage
-                    // while it keeps running. Nothing needs LVGL ticking
-                    // while nothing is being rendered anyway, so stop it
-                    // for the duration of RunIdleSleep() and restart it
-                    // right after.
+                    // tick_timer's 5ms period floors every idle gap
+                    // FreeRTOS sees, below CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP
+                    // (8 ticks), so automatic light sleep would never
+                    // engage while it keeps running. Stop it for the
+                    // duration of RunIdleSleep() and restart right after.
                     esp_timer_stop(tick_timer);
 
-                    // Wake-on-Motion for the duration of the nap loop
-                    // (2026-09-06, wom-wake-mode branch) — replaces the
-                    // tap-engine + SetLowPowerAccelOnly() approach after
-                    // that never once caught a real tap via GPIO wakeup on
-                    // hardware (the tap pulse is too brief for light
-                    // sleep's level-wakeup detector — see qmi8658.hpp's
-                    // EnterWakeOnMotion() comment). Same accel-only power
-                    // draw as before, different wake signal.
+                    // Wake-on-Motion for the duration of the nap loop — a
+                    // tap's INT2 pulse is too brief for light sleep's
+                    // level-wakeup detector (see qmi8658.hpp's
+                    // EnterWakeOnMotion() comment).
                     //
-                    // Double-tap-to-wake (2026-09-07 — was going to be a
-                    // plain confirmation debounce, turned into an
-                    // intentional gesture once hardware testing showed
-                    // what it actually takes): WoM alone is a pre-wake,
-                    // not a real one — even at the WoM threshold
-                    // register's ceiling (kWomThresholdMg=255, see its own
-                    // comment), an incidental hand bump near the device
-                    // was still enough to trigger it. Rather than lighting
-                    // the screen on every WoM event, this loop keeps the
-                    // screen off and demands a real tap — via the same tap
-                    // engine already trusted for the "distinct second tap
-                    // to resume" gate below — within a bounded window
-                    // (kWomConfirmWindowMs) right after each WoM pre-wake
-                    // before treating it as a genuine wake. No tap in that
-                    // window means straight back into WoM/light-sleep,
-                    // screen never touched.
-                    //
-                    // Originally expected a single "pick up and tap"
-                    // motion to satisfy both stages back-to-back (WoM
-                    // catching the start of the motion, the tap engine
-                    // catching the strike a beat later) — on real
-                    // hardware it doesn't work that way: the tap engine
-                    // isn't running yet at the instant the physical tap
-                    // happens (still in WoM mode until RunIdleSleep()
-                    // returns and ConfigureTap() finishes), so it never
-                    // sees that same tap's tail end, only ever a genuinely
-                    // separate second one. Decided to keep it anyway
-                    // rather than work around it — a deliberate two-tap
-                    // wake gesture is a reasonable, fairly common pattern
-                    // in its own right (matches this project's existing
-                    // "friction against accidental resume" philosophy —
-                    // design note 9 in app_controller.hpp — one level
-                    // earlier than where that friction used to start).
+                    // Double-tap-to-wake: WoM alone is a pre-wake, not a
+                    // real one — even at the threshold register's ceiling,
+                    // an incidental hand bump can trigger it. Rather than
+                    // lighting the screen on every WoM event, this loop
+                    // keeps the screen off and demands a real tap within a
+                    // bounded window (kWomConfirmWindowMs) right after
+                    // each WoM pre-wake before treating it as a genuine
+                    // wake — the tap engine isn't running yet at the
+                    // instant of the physical tap (still in WoM mode until
+                    // RunIdleSleep() returns), so it always needs a
+                    // genuinely separate second tap, not the same one's
+                    // tail end.
                     bool wom_confirmed_by_tap = false;
                     while (!wom_confirmed_by_tap) {
                         imu.EnterWakeOnMotion(kWomThresholdMg, kWomBlankingSamples);
-                        // Discard window for the same class of spurious
-                        // STATUS1 latch the old SetLowPowerAccelOnly(true)
-                        // needed one for (CTRL7 toggle -> one transient the
-                        // motion-detection front-end reads as real) — see
-                        // kWomBlankingSamples' comment above for why this is
-                        // still here even though WoM has its own built-in
-                        // blanking window.
+                        // Discard window for the spurious STATUS1 latch a
+                        // CTRL7 toggle can cause.
                         for (int i = 0; i < 30; ++i) {
                             (void)imu.PollWomEvent();
                             vTaskDelay(pdMS_TO_TICKS(20));
@@ -917,14 +619,10 @@ extern "C" void app_main(void)
                         const IdleSleepWakeReason wake_reason =
                             RunIdleSleep(imu, battery_monitor, AppController::kCriticalBatteryEnterV);
                         if (wake_reason == IdleSleepWakeReason::kCriticalBattery) {
-                            // Voltage crossed critical while this device
-                            // was already asleep with nobody around to
-                            // wake it (2026-09-12 — see
-                            // IdleSleepWakeReason's comment in
-                            // sleep_mode.hpp) — skip the WoM-confirm dance
-                            // entirely and go straight to deep sleep, same
-                            // as the "just noticed while awake" path
-                            // below. No need to ExitWakeOnMotion()/
+                            // Voltage crossed critical while already
+                            // asleep with nobody around to wake it — skip
+                            // the WoM-confirm dance and go straight to
+                            // deep sleep. No need to ExitWakeOnMotion()/
                             // ConfigureTap() first: deep sleep reboots on
                             // the way back regardless, so whatever state
                             // the IMU is left in gets reinitialized from
@@ -955,12 +653,9 @@ extern "C" void app_main(void)
                                    static_cast<long long>(esp_timer_get_time() - wom_confirmed_us));
                         }
 
-                        // Confirmation window — screen still off. Real
-                        // sensor polling here, not light sleep: this only
-                        // runs right after a WoM trigger (infrequent), and
-                        // needs the tap engine actively running, which
-                        // light sleep's GPIO wakeup doesn't need but a
-                        // synchronous poll loop does.
+                        // Confirmation window — screen still off, real
+                        // sensor polling (needs the tap engine actively
+                        // running, unlike light sleep's GPIO wakeup).
                         for (int elapsed_ms = 0; elapsed_ms < kWomConfirmWindowMs;
                              elapsed_ms += kWomConfirmPollMs) {
                             if (imu.PollTapEvent() != Qmi8658::TapEvent::kNone) {
@@ -975,46 +670,27 @@ extern "C" void app_main(void)
                         // reuse the normal exit path already does, no
                         // special-case teardown needed either way.
                     }
-                    // Gyro Turn On Time is 150ms + 3/ODR per the
-                    // QMI8658C datasheet (Tables 7/8) — the gyroscope's
-                    // MEMS resonator needs real physical spin-up time
-                    // after being re-enabled, unlike accel (3ms + 3/ODR,
-                    // near-instant). Feeding gyro samples into
-                    // AttitudeEstimator::Update() before that elapses
-                    // reads as the screen briefly not rotating after
-                    // waking (seen once on hardware, not reliably
-                    // reproducible — consistent with a ~150ms window
-                    // that's usually too short to notice). Wait past it
-                    // before resuming normal operation below.
+                    // Gyro Turn On Time is 150ms + 3/ODR (accel is
+                    // near-instant) — wait past it before feeding gyro
+                    // samples back into AttitudeEstimator::Update(),
+                    // which otherwise briefly reads as the screen not
+                    // rotating right after waking.
                     vTaskDelay(pdMS_TO_TICKS(160));
 
                     esp_timer_start_periodic(tick_timer, kLvglTickPeriodMs * 1000);
 
-                    // Re-inits the panel and forces a full redraw — see
-                    // gui_manager.hpp's ForceRedraw() comment. Called
-                    // before NotifyWokeFromIdleSleep() deliberately: a
-                    // full panel re-init could disturb backlight state
-                    // along the way, so brightness needs to be
-                    // (re-)applied after this, not before.
+                    // Called before NotifyWokeFromIdleSleep(): a full
+                    // panel re-init could disturb backlight state, so
+                    // brightness needs to be reapplied after this.
                     gui_manager.ForceRedraw();
                     app_controller.NotifyWokeFromIdleSleep();
 
-                    // Two things RunIdleSleep()'s pause invalidates,
-                    // both already solved once for the cold-boot case
-                    // above and reused here as-is:
-                    //   - last_sensor_update_us is now far in the past
-                    //     (however long the nap loop ran), so the next
-                    //     dt_ms computed from it would be huge — feeding
-                    //     that into AttitudeEstimator::Update()'s gyro
-                    //     integration would turn ordinary gyro noise into
-                    //     a large bogus angle swing. Reset both timers to
-                    //     now so the next tick sees a normal small dt_ms.
-                    //   - RunIdleSleep() only returns because it detected
-                    //     real movement, so angle_deg_ from before the
-                    //     nap is likely stale by the time we get here —
-                    //     SeedInitialAngle() again rather than letting
-                    //     the complementary filter slowly walk to the
-                    //     right value at its normal per-tick rate.
+                    // last_sensor_update_us is now far in the past, so
+                    // reset it to avoid feeding a huge dt_ms into gyro
+                    // integration. angle_deg_ from before the nap is
+                    // likely stale too, so seed it fresh rather than
+                    // letting the complementary filter walk to the right
+                    // value at its normal per-tick rate.
                     last_sensor_update_us = esp_timer_get_time();
                     next_sensor_update_us = last_sensor_update_us;
                     Qmi8658::Sample wake_sample;
@@ -1025,25 +701,14 @@ extern "C" void app_main(void)
 
                 if (label) {
                     const FixedParts angle = SplitFixed(RoundToFixed(attitude.screen_angle_deg, 10), 10);
-                    // 2 decimal places (scale=100), not 1 like angle above
-                    // — 0.1V differences matter a lot on a LiPo's curve,
-                    // 0.1 degree doesn't matter at all for a hand-rotated
-                    // angle. Always positive in practice, so no sign
-                    // prefix (unlike angle, which legitimately needs one).
+                    // 2 decimal places, not 1 like angle above — 0.1V
+                    // differences matter a lot on a LiPo's curve.
                     const FixedParts batt = SplitFixed(RoundToFixed(last_battery_voltage_v, 100), 100);
-                    // Split to 3 short lines, not 2 longer ones (2026-09-11,
-                    // after the battery diagnostics made line 2 long enough
-                    // to run past the round glass's visible width and get
-                    // clipped) — the panel is round, not square, so the
-                    // usable horizontal room at a fixed y shrinks the
-                    // further a line sits from vertical center; this label
-                    // is anchored near the top (LV_ALIGN_TOP_MID, y=30
-                    // below), the narrowest part, so each line needs to
-                    // stay short regardless of how many lines there are.
-                    // R%d%c: last averaged raw ADC count plus a C/U flag
-                    // for whether BatteryMonitor's calibration scheme is
-                    // active (see BatteryMonitor::ReadVoltage()'s comment)
-                    // — kept short ("R" not "Raw") for the same reason.
+                    // Split to 3 short lines — the panel is round, and
+                    // this label sits near the narrow top, so each line
+                    // needs to stay short. R%d%c: last averaged raw ADC
+                    // count plus a C/U flag for whether BatteryMonitor's
+                    // calibration scheme is active.
                     lv_label_set_text_fmt(label, "Ang %c%d.%01d Taps%d\nMv%d FPS%u\nBat%d.%02dV R%d%c",
                         angle.sign, angle.whole, angle.frac, tap_count,
                         attitude.is_moving ? 1 : 0, static_cast<unsigned int>(fps_display),

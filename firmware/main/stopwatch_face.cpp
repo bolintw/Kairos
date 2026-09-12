@@ -48,24 +48,18 @@ void StopwatchFace::render(GuiManager& gui)
         std::snprintf(buf, sizeof(buf), "%02u:%02u",
                        static_cast<unsigned int>(minutes), static_cast<unsigned int>(seconds));
     }
-    // Defensive reset, not just cosmetic default: GuiManager's text-opacity
-    // state persists across face switches, so flipping away from
-    // PomodoroFace mid-caption-fade (see its render()) would otherwise
-    // leave this face's digits stuck at whatever partial opacity the
-    // caption was fading through.
+    // Resets: opacity/secondary-text state persists across face switches
+    // (e.g. mid-fade from PomodoroFace, or a stale phase name from BreathFace).
     gui.SetPrimaryTextOpacity(255);
     gui.SetPrimaryText(buf);
     gui.SetAccentColor(kColorCountUp);
-    gui.SetSecondaryText("");  // see PomodoroFace::render()'s identical reset — same leftover-state risk from BreathFace
+    gui.SetSecondaryText("");
 }
 
 TimerFace::Status StopwatchFace::GetStatus() const
 {
-    // remaining_ms repurposed as "ms elapsed this run" (2026-09-09, see
-    // timer_face.hpp's Status comment) — it had no meaning for a
-    // has_target=false face before; now it's what AppController's ring
-    // uses to grow a count-up progress ring (one hour per revolution),
-    // which is_count_up=true selects.
+    // remaining_ms repurposed as "ms elapsed this run" — drives
+    // AppController's count-up ring (one hour per revolution).
     return Status{running_, /*has_target=*/false, elapsed_ms_, /*is_break_phase=*/false, /*target_ms=*/0,
                   /*is_count_up=*/true};
 }

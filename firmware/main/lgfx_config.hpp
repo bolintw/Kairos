@@ -7,11 +7,9 @@
 // round panel over SPI. Pin values from hardware_pinout.md.
 //
 // Backlight (GPIO40) is driven via LovyanGFX's built-in Light_PWM
-// controller (LEDC PWM under the hood), not a plain on/off GpioPin — M1
-// used GpioPin since only on/off was needed then, but M7's brightness
-// notifications (fade, breathing pulse) need real analog dimming.
-// Channel 7 avoids the low channels LovyanGFX's own SPI/DMA setup might
-// touch.
+// controller for real analog dimming (fade/breathing-pulse brightness
+// notifications). Channel 7 avoids the low channels LovyanGFX's own
+// SPI/DMA setup might touch.
 class LGFX : public lgfx::LGFX_Device {
 public:
     lgfx::Panel_GC9A01 _panel_instance;
@@ -23,13 +21,7 @@ public:
             auto cfg = _bus_instance.config();
             cfg.spi_host = SPI2_HOST;
             cfg.spi_mode = 0;
-            // 40 -> 80MHz (2026-09-06) — hardware_pinout.md already notes
-            // this panel supports 80MHz (theoretical full-screen flush
-            // ~11.5ms), never tried until the main-loop timing
-            // investigation showed SPI transfer (flush_us) as ~35% of
-            // lv_timer_handler()'s cost. Short traces, no signal-integrity
-            // testing done — watch for garbled pixels after flashing.
-            cfg.freq_write = 80000000;
+            cfg.freq_write = 80000000;  // panel supports 80MHz per hardware_pinout.md
             cfg.freq_read = 16000000;
             cfg.spi_3wire = false;
             cfg.use_lock = true;
@@ -52,10 +44,7 @@ public:
             cfg.offset_y = 0;
             cfg.offset_rotation = 0;
             cfg.readable = false;  // no MISO wired
-            // GC9A01 panels commonly need color inversion — unverified on
-            // this specific board, check the first fillScreen() and flip
-            // if colors look wrong.
-            cfg.invert = true;
+            cfg.invert = true;  // GC9A01 panels commonly need color inversion
             cfg.rgb_order = false;
             cfg.dlen_16bit = false;
             cfg.bus_shared = false;

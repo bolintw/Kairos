@@ -4,11 +4,9 @@
 
 #include "driver/i2c_master.h"
 
-// M0 hardware check: confirm the I2C bus is wired correctly and only the
-// QMI8658 IMU is on it (hardware_pinout.md: SDA=6, SCL=7, no touch IC on
-// this non-touch board variant). One-shot diagnostic — creates its own
-// bus and tears it down when done, since M3+ will set up a persistent
-// bus for actual sensor reads.
+// Hardware check: confirm the I2C bus is wired correctly and only the
+// QMI8658 IMU is on it (hardware_pinout.md: SDA=6, SCL=7). One-shot
+// diagnostic — creates its own bus and tears it down when done.
 inline void RunI2cScan()
 {
     constexpr gpio_num_t kSda = GPIO_NUM_6;

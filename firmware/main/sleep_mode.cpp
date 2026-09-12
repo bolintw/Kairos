@@ -14,88 +14,38 @@ namespace {
 
 constexpr gpio_num_t kImuInt2Gpio = GPIO_NUM_48;
 
-// Backstop period for the timer wakeup source below — same role as the
-// old plain-poll version's vTaskDelay() period, see its own history for
-// why 1000ms specifically. Not a poll interval anymore in the literal
-// sense (this loop doesn't vTaskDelay() at all now), just the ceiling on
-// how long a single esp_light_sleep_start() call is allowed to sleep
+// Ceiling on how long a single esp_light_sleep_start() call may sleep
 // before waking on its own regardless of GPIO activity.
 constexpr uint32_t kSleepBackstopMs = 1000;
 
-// How often this loop checks battery voltage while otherwise just
-// waiting for WoM (2026-09-12 — see IdleSleepWakeReason's comment in
-// sleep_mode.hpp for why it checks at all). Same 30s figure as main.cpp's
-// kCriticalBatteryCheckPeriodUs for consistency, not because the two are
-// required to match — this one governs "how soon does an already-sleeping
-// device notice it crossed the critical threshold", that one governs "how
-// often does an already-critical device re-check for recovery"; different
-// questions that happen to want a similar answer.
+// How often this loop checks battery voltage while otherwise waiting for
+// WoM, piggybacked on the same backstop timer.
 constexpr int64_t kBatteryCheckIntervalUs = 30LL * 1000 * 1000;
 
-// Gates the SLEEP,err=...,cause=...,int2=... line below — tied to the
-// shared kDebugEnabled (debug_config.hpp, 2026-09-12) alongside
-// qmi8658.hpp's tap/WoM logs and main.cpp's overlay/WoM-latency log; see
-// that header's comment for why this group merges while
-// kAttitudeDebugLogEnabled/kLoopTimingLogEnabled (main.cpp) stay separate.
 constexpr bool kSleepDebugLogEnabled = kDebugEnabled;
 
 }  // namespace
 
-// Manual esp_light_sleep_start() loop with a real GPIO wakeup source
-// (2026-09-06) — third attempt at instant tap-wake, after two prior ones
-// on the *automatic* PM/tickless-idle light sleep path both failed (see
-// git history / gravity_timer_project_plan.md's M9 section for the full
-// writeup):
-//   1. An edge-triggered runtime ISR (gpio_isr_handler_add) coexisting
-//      with gpio_wakeup_enable() on the same pin crashed twice
-//      (watchdog panic, ISR livelock) — gpio_wakeup_enable() silently
-//      overwrites the pin's one hardware intr_type register from edge to
-//      level, and if the pin was already high, the level ISR re-fires
-//      forever. Confirmed against ESP-IDF's own gpio.c
-//      (gpio_hal_set_intr_type() called unconditionally) and a matching
-//      upstream report (esp-idf#13444).
-//   2. Dropping the runtime ISR in favor of an
-//      esp_pm_light_sleep_register_cbs() exit callback didn't crash, but
-//      esp_sleep_get_wakeup_cause() read UNDEFINED on every single poll.
-//      Confirmed against sleep_modes.c: esp_sleep_get_wakeup_cause()
-//      only returns a real cause when s_light_sleep_wakeup is true, which
-//      is only set when esp_light_sleep_start() returned ESP_OK — so
-//      UNDEFINED forever means every attempt returned something else,
-//      not "never tried." ESP32-S3's RTC_SLEEP_REJECT_MASK (soc/rtc.h)
-//      includes RTC_GPIO_TRIG_EN — if IMU_INT2/GPIO48 is already at the
-//      armed wakeup level (HIGH) the instant sleep is attempted, the
-//      hardware rejects the whole attempt outright
-//      (ESP_ERR_SLEEP_REJECT) rather than entering and immediately
-//      exiting. Both failures above are explained by the same single
-//      fact — GPIO48 being high when it's expected to be low — without
-//      needing two separate root causes.
+// Manual esp_light_sleep_start() loop with a real GPIO wakeup source on
+// IMU_INT2. No runtime ISR is registered on this pin — gpio_wakeup_enable()
+// silently overwrites the pin's hardware intr_type from edge to level,
+// and combining it with a separate edge-triggered ISR on the same pin
+// causes a livelock if the pin is already high when armed. Calling
+// esp_light_sleep_start() directly and synchronously here (rather than
+// through ESP-IDF's automatic PM/tickless-idle path) also means err and
+// esp_sleep_get_wakeup_cause() are read right where they're produced.
 //
-// This version sidesteps both: no runtime ISR is ever registered on this
-// pin (removes failure 1's whole mechanism), and esp_light_sleep_start()
-// is called directly, synchronously, in this task, so err and
-// esp_sleep_get_wakeup_cause() are read right where they're produced —
-// no opaque idle-task-context callback in between (removes failure 2's
-// diagnostic blind spot). Confirmed on real hardware afterward: err=0,
-// cause=4 (ESP_SLEEP_WAKEUP_TIMER) every single cycle, current a stable
-// ~0.82mA — light sleep itself is genuinely healthy now. What it also
-// showed: cause was *never* 7 (ESP_SLEEP_WAKEUP_GPIO), across several
-// real taps — every wake fell through to the 1s timer backstop instead.
-// That's what motivated switching from the tap engine to Wake-on-Motion
-// (2026-09-06, wom-wake-mode branch) as the wakeup signal — see
-// qmi8658.hpp's EnterWakeOnMotion()/PollWomEvent() and main.cpp's
-// idle-sleep block for the IMU-side half of this change; a tap's INT2
-// pulse is brief, a WoM event's is a held level, and only the latter is
-// the shape light sleep's GPIO wakeup can reliably catch.
+// The wakeup signal is Wake-on-Motion, not the tap engine: a tap's INT2
+// pulse is too brief for light sleep's GPIO wakeup to catch reliably,
+// while a WoM event holds the line until read — see
+// qmi8658.hpp's EnterWakeOnMotion()/PollWomEvent().
 IdleSleepWakeReason RunIdleSleep(Qmi8658& imu, BatteryMonitor& battery_monitor, float critical_battery_v)
 {
     gpio_config_t cfg = {};
     cfg.pin_bit_mask = 1ULL << kImuInt2Gpio;
     cfg.mode = GPIO_MODE_INPUT;
-    // INT2 is push-pull (datasheet Section 6, actively driven both ways
-    // by the IMU) so this shouldn't matter in steady state, but pulling
-    // to the level opposite the wakeup trigger is what the upstream
-    // esp-idf#13444 discussion recommends as a defensive measure for any
-    // brief window where the pin isn't being actively driven.
+    // Defensive pull-down opposite the wakeup trigger, for any brief
+    // window where the (normally push-pull) pin isn't actively driven.
     cfg.pull_down_en = GPIO_PULLDOWN_ENABLE;
     gpio_config(&cfg);
 
@@ -108,31 +58,18 @@ IdleSleepWakeReason RunIdleSleep(Qmi8658& imu, BatteryMonitor& battery_monitor, 
 
     while (true) {
         const esp_err_t err = esp_light_sleep_start();
-        // Diagnostic, left in deliberately (2026-09-06; gated behind
-        // kSleepDebugLogEnabled 2026-09-07) — cheap (once per real sleep
-        // attempt, not per tick), and this is exactly the data needed to
-        // tell "rejected" / "slept but GPIO didn't trigger" / other apart
-        // on real hardware instead of guessing again.
         if (kSleepDebugLogEnabled) {
             printf("SLEEP,err=%d,cause=%d,int2=%d\n", static_cast<int>(err),
                    static_cast<int>(esp_sleep_get_wakeup_cause()), gpio_get_level(kImuInt2Gpio));
         }
 
-        // Wake-on-Motion (2026-09-06, wom-wake-mode branch — was
-        // PollTapEvent()) — gyro is disabled for the duration of this
-        // call (see main.cpp's EnterWakeOnMotion() call just before
-        // this), so there's no gyro-magnitude check to make here anymore,
-        // same as the tap-based version this replaced.
         if (imu.PollWomEvent()) {
             wake_reason = IdleSleepWakeReason::kMotion;
             break;
         }
 
-        // Battery check (2026-09-12) — see IdleSleepWakeReason's comment
-        // in sleep_mode.hpp. Piggybacks on this same ~1s backstop wake
-        // rather than adding a separate sleep/wake cycle of its own, just
-        // gated to only actually read the ADC every kBatteryCheckIntervalUs
-        // — no reason to spend that on every single 1s backstop.
+        // Piggyback the battery check on this same backstop wake, only
+        // actually reading the ADC every kBatteryCheckIntervalUs.
         const int64_t now_us = esp_timer_get_time();
         if (now_us >= next_battery_check_us) {
             next_battery_check_us = now_us + kBatteryCheckIntervalUs;
@@ -142,13 +79,9 @@ IdleSleepWakeReason RunIdleSleep(Qmi8658& imu, BatteryMonitor& battery_monitor, 
             }
         }
 
-        // err != ESP_OK (most likely ESP_ERR_SLEEP_REJECT, see the class
-        // comment above) means esp_light_sleep_start() returned near-
-        // instantly without actually sleeping — looping straight back
-        // into it would busy-spin at full CPU/power until whatever's
-        // holding GPIO48 high clears. This bounds that to a plain poll,
-        // same shape as the old fallback version, instead of a silent
-        // spin.
+        // err != ESP_OK means esp_light_sleep_start() returned without
+        // actually sleeping; bound the retry to a plain poll instead of
+        // busy-spinning.
         if (err != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(50));
         }

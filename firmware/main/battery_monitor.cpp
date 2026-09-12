@@ -8,49 +8,22 @@ namespace {
 // GPIO1 = ADC1_CH0 on ESP32-S3 (hardware_pinout.md's "Battery ADC" row).
 constexpr adc_unit_t kAdcUnit = ADC_UNIT_1;
 constexpr adc_channel_t kAdcChannel = ADC_CHANNEL_0;
-// ~0-3.3V full-scale — the divided battery signal (a 3.0-4.2V LiPo range
-// through the real ~3:1 divider, see kDividerRatio below, is ~1.0-1.4V at
-// the pin) sits well inside it, no need for a narrower/more sensitive
-// attenuation.
+// ~0-3.3V full-scale comfortably covers the divided battery signal
+// (~1.0-1.4V at the pin for a 3.0-4.2V LiPo through kDividerRatio below).
 constexpr adc_atten_t kAdcAtten = ADC_ATTEN_DB_12;
 constexpr adc_bitwidth_t kAdcBitwidth = ADC_BITWIDTH_DEFAULT;
 
-// hardware_pinout.md: "ADC measurement should average multiple samples —
-// battery voltage dips briefly under load, so measurement timing affects
-// the reading". Averaged as raw counts, not as post-conversion
-// voltages — equivalent for a near-linear calibration curve and only
-// needs one adc_cali_raw_to_voltage() call instead of kNumSamples of them.
+// Battery voltage sags under load, so average multiple samples rather
+// than trust a single read. Averaged as raw counts, not post-conversion
+// voltages, so only one adc_cali_raw_to_voltage() call is needed.
 constexpr int kNumSamples = 32;
 
-// 2.0f -> 3.0f -> 3.114f (2026-09-11, same day): hardware_pinout.md
-// documented R4=R7=100K (1:1, /2 divider) as of its 2026-08-25
-// correction, but real hardware measurement contradicted it — multimeter
-// read VBAT=3.945V and the ADC pin=1.3062V simultaneously, ratio
-// 3.945/1.3062 = 3.02, not 2, so this was first set to a round 3.0f.
-// Refined once more the same day from a second, *end-to-end* data point:
-// with 3.0f in place, this class's own output read 3.8V against a
-// simultaneous multimeter VBAT reading of 3.945V — scaling 3.0f by
-// 3.945/3.8 gives 3.114f. This end-to-end scale factor (real VBAT over
-// this class's own output) is deliberately what's used here, not a purer
-// "just the resistor ratio" number the way the first correction above
-// was reasoned — it also absorbs whatever small residual bias sits in
-// the ADC calibration curve itself (already known to be small, ~2%, from
-// the first correction's cross-check), which is exactly what's wanted
-// when the goal is this class's output matching real VBAT as closely as
-// possible, not deriving R4/R7's true nominal values. Not measured
-// directly (see hardware_pinout.md's note — in-circuit resistance
-// measurement was fighting C13's parallel charging transient); this
-// voltage-ratio approach sidesteps that entirely.
+// Measured end-to-end against a multimeter (firmware output vs real
+// VBAT), not derived from the divider's nominal resistor values.
 constexpr float kDividerRatio = 3.114f;
 
-// Fallback for when the calibration scheme can't be created (e.g. the
-// calibration eFuse bits aren't burned on this particular chip) —
-// hardware_pinout.md's own naive formula (assumes an ideal 3.3V Vref and
-// a full-scale 12-bit/4095 count), less accurate than the calibrated
-// curve-fitting path but a reasonable baseline; that doc's own note
-// ("use the adc_cali calibration API in place of the linear formula if
-// needed") frames the linear formula as the starting point this upgrades
-// from, not the other way round.
+// Fallback linear formula (ideal 3.3V Vref, 12-bit/4095 count) for when
+// the calibration scheme can't be created.
 constexpr float kFallbackVrefMv = 3300.0f;
 constexpr float kFallbackMaxCount = 4095.0f;
 }  // namespace
@@ -93,14 +66,8 @@ float BatteryMonitor::ReadVoltage()
     int good_samples = 0;
     for (int i = 0; i < kNumSamples; ++i) {
         int raw = 0;
-        // Bug fixed 2026-09-11: this used to divide by kNumSamples
-        // unconditionally below, silently under-averaging (and therefore
-        // under-reporting voltage) by up to the full failed-sample
-        // fraction whenever adc_oneshot_read() returned non-OK for some
-        // samples — caught from a real hardware mismatch (multimeter said
-        // 3.983V, this reported 2.56V, a ~36% low reading consistent with
-        // roughly a third of the 32 reads failing and still being counted
-        // in the denominator).
+        // Divide by the actual successful count below, not kNumSamples —
+        // a failed adc_oneshot_read() must not silently pull the average down.
         if (adc_oneshot_read(adc_handle_, kAdcChannel, &raw) == ESP_OK) {
             raw_sum += raw;
             ++good_samples;

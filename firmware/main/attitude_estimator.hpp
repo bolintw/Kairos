@@ -2,38 +2,26 @@
 
 #include <cstdint>
 
-// DRAFT — for discussion, not implemented yet (see notes below).
-//
 // Pure sensor fusion: tracks the device's continuous in-plane rotation
-// angle and whether it's currently moving. Deliberately knows nothing
-// about "faces" — which angle range means which TimerFace, and the
-// hysteresis/debounce needed before switching, are AppController's job
-// (it already owns "centralized attitude-decision (hysteresis)
-// management" per the plan). This
-// class just answers "what angle, how confidently, is it settled" —
-// AppController is the one that decides what that angle *means*.
+// angle and whether it's currently moving. Knows nothing about "faces" —
+// AppController decides what an angle means; this class only reports it.
 //
-// Device geometry (resolved 2026-08-22): the screen always faces the
-// user. Rotating the device means spinning it about the axis pointing at
-// the user (perpendicular to the screen), not tipping a face up against
-// gravity. So in normal use, gravity stays confined to the screen's own
-// plane (AX/AY), and the rotation axis being tracked is GZ (body frame).
-// AZ should read ~0g whenever the screen genuinely faces the user; a
-// non-zero AZ signals the device is tilted out of that plane (picked up,
-// mid-flip, held wrong) — see is_moving below.
+// Device geometry: the screen always faces the user, and rotating the
+// device means spinning it about the axis pointing at the user
+// (perpendicular to the screen), not tipping a face up against gravity.
+// So gravity stays confined to the screen's own plane (AX/AY) in normal
+// use, and the rotation axis being tracked is GZ. AZ should read ~0g
+// whenever the screen genuinely faces the user; a nonzero AZ means the
+// device is tilted out of that plane (picked up, mid-flip, held wrong).
 //
-// This collapses what would otherwise be a full 3D orientation problem
-// into a single scalar: an in-plane rotation angle computed as
-// atan2(accel_g[0], -accel_g[1]), continuously tracked via a complementary
-// filter (GZ integration corrected by this accel-derived angle).
-// Deliberately NOT a general 3D attitude estimator (no quaternion/DCM):
-// full 3D orientation only matters transiently during the flip itself,
-// and mid-flip we don't need smooth angle tracking — we're just waiting
-// for motion to settle before AppController re-classifies the face.
+// Collapses what would otherwise be a full 3D orientation problem into a
+// single scalar — an in-plane angle from atan2(accel_g[0], -accel_g[1]),
+// tracked via a complementary filter (GZ integration corrected by this
+// accel-derived angle). Not a general 3D attitude estimator: full 3D
+// orientation only matters transiently during the flip itself.
 //
-// Pure computation, no hardware/I2C knowledge — Sample values are passed
-// in by whatever owns the sensor (AppController), so this can be unit
-// tested on host with literal arrays, no fake/mock driver needed.
+// Pure computation, no hardware/I2C knowledge — can be unit tested on
+// host with literal Sample arrays.
 class AttitudeEstimator {
 public:
     struct Sample {
@@ -43,129 +31,57 @@ public:
 
     struct Output {
         float screen_angle_deg;  // continuous in-plane rotation, updates
-                                  // even while is_moving (screen stays lit
-                                  // through a flip, only dims once settled
-                                  // and counting — freezing this mid-flip
-                                  // would look broken). AppController
-                                  // quantizes this into a Face with its
-                                  // own hysteresis; this class doesn't
-                                  // know what a "face" is.
-        bool is_moving;          // true when the full 3-axis gyro
-                                  // magnitude exceeds a "settled"
-                                  // threshold — mixed rather than GZ-only,
-                                  // since nonzero GX/GY usually means the
-                                  // device is being picked up rather than
-                                  // spun in-plane. If this proves too
-                                  // sensitive in practice (e.g. waking
-                                  // mid-work from an unrelated bump),
-                                  // revisit narrowing back to GZ-only.
+                                  // even while is_moving; AppController
+                                  // quantizes this into a Face
+        bool is_moving;          // true when full 3-axis gyro magnitude
+                                  // exceeds a "settled" threshold
         bool in_valid_plane;     // true while |AZ| stays within a
-                                  // hysteresis band (see
-                                  // attitude_estimator.cpp's
-                                  // kAzInvalidEnterThresholdG/
-                                  // kAzValidReturnThresholdG), i.e. the
-                                  // screen is genuinely facing the user —
-                                  // low confidence in screen_angle_deg
-                                  // while false. AppController (2026-09-08)
-                                  // uses a sustained false here, held for a
-                                  // couple seconds, as the "pick the device
-                                  // up to check battery" gesture — see its
-                                  // showing_battery_ design note. This
-                                  // class only reports the fact; what it
-                                  // means stays in AppController, same as
-                                  // Face.
+                                  // hysteresis band, i.e. the screen is
+                                  // genuinely facing the user; low
+                                  // confidence in screen_angle_deg while
+                                  // false. AppController also uses a
+                                  // sustained false here as the
+                                  // "pick the device up" battery-check gesture.
 
-        // Diagnostic-only fields (2026-09-06), not used by AppController —
-        // added to actually see, rather than guess, what's happening
-        // during the post-flip "reverses slightly then creeps back to the
-        // right angle" feel reported on hardware. screen_angle_deg above
-        // is already the blend of these two; having them split out lets a
-        // serial log (see main.cpp's kAttitudeDebugLogEnabled) show
-        // whether the reversal comes from the accel-derived angle itself
-        // overshooting/lagging as gz drops, from the blend weight ramping
-        // up too abruptly, or something else not yet hypothesized.
-        float debug_gyro_only_angle_deg;   // angle_from_gyro this tick: pure
-                                            // integration, no accel
-                                            // correction applied
+        // Diagnostic-only, for the serial debug log.
+        float debug_gyro_only_angle_deg;   // pure gyro integration, no accel correction
         float debug_accel_only_angle_deg;  // this tick's accel-derived angle
-                                            // (AngleFromAccel on the
-                                            // low-passed accel reading),
-                                            // computed even when
-                                            // !in_valid_plane — untrustworthy
-                                            // there, but still worth seeing
-        float debug_gz_dps;                // bias-corrected, low-passed
-                                            // gyro Z used above — the
-                                            // in-plane rotation speed that
-                                            // drives AccelTrustWeight
+        float debug_gz_dps;                // bias-corrected, low-passed gyro Z
     };
 
-    // Sign convention, confirmed on hardware with the debug overlay's
-    // gyro chart. History: CCW=positive in the very first version;
-    // flipped 2026-08-23 to CW=positive; flipped back to CCW=positive
-    // 2026-09-11 — the 08-23 flip turned out to be based on a
-    // mis-description of the intended convention, caught only once the
-    // on-screen debug angle ("Ang" in the overlay) was watched directly
-    // against physical rotation. Underlying hardware facts below are
-    // unchanged either time, only the sign applied to them:
-    //   - screen upright, facing user: accel ~= (0, -1, 0)g,
-    //     screen_angle_deg = 0
-    //   - rotated 90 deg counter-clockwise (as seen by the user looking
-    //     at the screen): accel ~= (+1, 0, 0)g, screen_angle_deg = +90,
-    //     and this rotation reads as *negative* GZ (confirmed via the
-    //     gyro chart; an earlier guess from raw numbers alone said GX —
-    //     the chart corrected that)
-    //   - so: screen_angle_deg = atan2(accel_g[0], -accel_g[1]) matches
-    //     both points above, and d(screen_angle_deg)/dt = -gyro_dps[2]
-    //   - AZ is expected ~0g by construction (see class comment). Its
-    //     magnitude drives Output::in_valid_plane (see above): once |AZ|
-    //     crosses a threshold, Update() also stops applying the
-    //     accel-derived correction that tick and falls back to pure gyro
-    //     integration, since accel isn't trustworthy in that state.
+    // Sign convention (CCW-positive), confirmed on hardware:
+    //   - screen upright, facing user: accel ~= (0, -1, 0)g, angle = 0
+    //   - rotated 90 deg counter-clockwise (user's view): accel ~=
+    //     (+1, 0, 0)g, angle = +90, and reads as negative GZ
+    //   - so: screen_angle_deg = atan2(accel_g[0], -accel_g[1]), and
+    //     d(screen_angle_deg)/dt = -gyro_dps[2]
+    //   - AZ's magnitude drives Output::in_valid_plane; once |AZ| crosses
+    //     the threshold, Update() falls back to pure gyro integration
+    //     since accel isn't trustworthy in that state.
     //
-    // face_a_offset_deg: per-device mounting calibration (in case the
+    // face_a_offset_deg: per-device mounting calibration, in case the
     // IMU's raw angle-zero isn't exactly where the enclosure's "face A"
-    // reference is) — a sensor-calibration concern, not a face-semantics
-    // one, so it stays here rather than moving to AppController. Defaults
-    // to 0; revisit once real hardware calibration is needed.
+    // reference is.
     //
-    // accel_bias_g: X/Y zero-offset of the accelerometer itself
-    // (2026-08-31) — a different error from face_a_offset_deg above.
-    // That offset only corrects *rotation* (where angle 0 points); this
-    // corrects a fixed translation in the raw (ax,ay) reading that stays
-    // constant in sensor-frame regardless of orientation. Left
-    // uncorrected, screen_angle_deg's error isn't uniform across faces —
-    // small near wherever face_a_offset_deg happened to null it out at
-    // calibration time, larger elsewhere, worst near the opposite side of
-    // the rotation (confirmed on hardware, 2026-08-30: B ~0.8 deg off, A
-    // ~3.7, C ~5.7, D ~9.6 — not a flat offset, growing with angular
-    // distance from B). Subtracted from filtered_accel_g_[0]/[1] before
-    // every AngleFromAccel() call, both here and in SeedInitialAngle().
-    // Measured via RunCalibrationMode's multi-orientation circle-center
-    // fit, not derivable from a single reading the way
-    // face_a_offset_deg is.
+    // accel_bias_g: X/Y zero-offset of the accelerometer itself — a
+    // separate, fixed translation error in sensor-frame, distinct from
+    // face_a_offset_deg (which only corrects rotation). Subtracted from
+    // filtered_accel_g_ before every AngleFromAccel() call.
     explicit AttitudeEstimator(float face_a_offset_deg = 0.0f, float accel_bias_x_g = 0.0f, float accel_bias_y_g = 0.0f);
 
     // Call once per sensor tick. dt_ms is elapsed time since the previous
     // call, used for both the gyro integration and the complementary
-    // filter's time constant. See Output::is_moving and
-    // Output::in_valid_plane above for how the 3-axis gyro magnitude and
-    // |AZ| thresholds factor in.
+    // filter's time constant.
     Output Update(const Sample& sample, uint32_t dt_ms);
 
     // Call while the device is known stationary (e.g. once at boot) to
     // measure gyro bias; Update() subtracts it from all future samples.
     void CalibrateGyroZeroOffset(const Sample& stationary_sample);
 
-    // Call once at boot, before the first Update(), with a fresh sample —
-    // sets angle_deg_ directly from this sample's accel-derived angle
-    // instead of leaving it at the 0.0f default. Without this, a boot
-    // anywhere other than face A's reference orientation (e.g. plugged in
-    // via USB-C while resting on face D) starts a full-size error that
-    // the complementary filter then has to walk down at its normal
-    // per-tick rate, same as any other correction — visible as "takes a
-    // moment to reach the right angle" right after flashing. A no-op if
-    // the sample isn't in the valid plane (see Output::in_valid_plane);
-    // Update() will fall back to converging normally in that edge case.
+    // Call once at boot, before the first Update(), with a fresh sample to
+    // seed angle_deg_ directly instead of leaving it at 0 (which would
+    // otherwise take a moment to converge if booting off face A). No-op
+    // if the sample isn't in the valid plane.
     void SeedInitialAngle(const Sample& sample);
 
 private:
@@ -175,28 +91,17 @@ private:
     float gyro_bias_dps_[3] = {0.0f, 0.0f, 0.0f};
     float angle_deg_ = 0.0f;  // last output angle, already offset-corrected
 
-    // Single-pole low-pass on the raw accel/gyro samples, applied before
-    // anything else in Update() (2026-08-25, the plan's long-deferred
-    // "first-order filter" idea — see git history for why it was put off until
-    // real jitter was measured on hardware). Standard EMA:
-    // x = new_x*alpha + x*(1-alpha), seeded from the first real sample
-    // (has_filtered_sample_) rather than 0 so there's no startup
-    // transient. Accel and gyro use separate real-time constants
-    // (kAccelLowPassTauMs/kGyroLowPassTauMs, split 2026-08-31 — see their
-    // comment; converted from fixed per-tick alphas to dt-scaled ones
-    // 2026-09-06, see kGyroLowPassTauMs's comment) despite sharing this
-    // same field-level design; both are also separate from
-    // kComplementaryTauMs — these smooth the raw inputs, that blends
-    // gyro-integration against accel for the output angle; don't confuse
-    // the two kinds.
+    // Single-pole low-pass (EMA) on raw accel/gyro, applied before
+    // anything else in Update(). Seeded from the first real sample
+    // (has_filtered_sample_) rather than 0 to avoid a startup transient.
+    // Accel and gyro use separate time constants (kAccelLowPassTauMs/
+    // kGyroLowPassTauMs) — distinct from kComplementaryTauMs, which
+    // blends gyro-integration against accel for the output angle.
     float filtered_accel_g_[3] = {0.0f, 0.0f, 0.0f};
     float filtered_gyro_dps_[3] = {0.0f, 0.0f, 0.0f};
     bool has_filtered_sample_ = false;
 
-    // Schmitt-trigger state for Output::in_valid_plane (2026-09-08) — see
-    // attitude_estimator.cpp's kAzInvalidEnterThresholdG/
-    // kAzValidReturnThresholdG comment. Defaults true (assume valid until
-    // proven otherwise); SeedInitialAngle() re-seeds it from a real sample
-    // if called before the first Update().
+    // Schmitt-trigger state for Output::in_valid_plane. Defaults true;
+    // SeedInitialAngle() re-seeds it if called before the first Update().
     bool in_valid_plane_ = true;
 };

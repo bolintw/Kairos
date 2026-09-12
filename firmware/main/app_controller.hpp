@@ -6,485 +6,133 @@
 #include "gui_manager.hpp"
 #include "timer_face.hpp"
 
-// DRAFT — face-switching + Factory. Revised 2026-08-23 after hardware
-// testing surfaced a real bug in the first version (see below).
+// Owns face-switching (hysteresis + Factory), brightness/ring
+// notifications, idle sleep, and the battery-check/low-battery screens.
 //
 // Design:
 //
-// 1. Quantize AttitudeEstimator::Output::screen_angle_deg into A/B/C/D,
-//    centered on -90/0/90/180 (A/B/C/D respectively, set 2026-08-23; these
-//    numbers briefly swapped for A/C then reverted the same day, 2026-09-11
-//    — see FaceCenterDeg's comment in app_controller.cpp — when
-//    screen_angle_deg's CW->CCW-positive flip meant keeping these numbers
-//    fixed to their content changes which physical twist reaches each one).
-//    Physical mapping is provisional pending M10 enclosure geometry —
-//    trivial to change later. A=PomodoroFace(25,5), B=PomodoroFace(50,10),
-//    C=StopwatchFace, D=BreathFace (see CreateFace).
+// 1. Quantizes screen_angle_deg into A/B/C/D, centered on -90/0/90/180.
+//    A=PomodoroFace(25,5), B=PomodoroFace(50,10), C=StopwatchFace,
+//    D=BreathFace (see CreateFace). QuantizeFace() is stateful hysteresis:
+//    it only leaves current_face_ once the angle is more than
+//    kFaceHysteresisLeaveDeg past current_face_'s own center, and only
+//    returns once within (90-kFaceHysteresisLeaveDeg) of the target's
+//    center — avoids flip-flopping near a boundary from resting noise.
 //
-//    Angle hysteresis (added 2026-08-23, user's drone flight-controller
-//    background): quantization alone would flip-flop if the settled
-//    angle sits near a 45-degree boundary (small accel noise while
-//    resting is enough). QuantizeFace() is stateful: it only moves off
-//    current_face_ once the angle is more than kFaceHysteresisLeaveDeg
-//    away from current_face_'s own center; otherwise it stays put. That
-//    single rule produces both halves of the intended band by
-//    construction — e.g. currently on B (center 0): stays B until angle
-//    passes -kFaceHysteresisLeaveDeg/+kFaceHysteresisLeaveDeg ("leave"),
-//    and once on A or C, doesn't come back to B until within
-//    (90-kFaceHysteresisLeaveDeg) of B's center ("return" —
-//    kFaceHysteresisLeaveDeg away from A/C's own center, same rule, just
-//    measured from the other side). Currently 65 (see app_controller.cpp
-//    for the 80->70->65 history), so leave at +-65, return within +-25.
+// 2. A face commit (onExit/onEnter) fires the instant the quantized face
+//    disagrees with current_face_, moving or not — QuantizeFace's own
+//    hysteresis is enough proof real movement happened. A fast swipe
+//    that passes through a face's zone on the way to another commits
+//    (and resets) that passed-through face too.
 //
-// 2. Reset (onExit/onEnter) fires only when, at rest, the quantized face
-//    disagrees with current_face_ (the confirmed face) — not on every
-//    is_moving blip. First version fired on any settle-after-motion,
-//    including settling back to the SAME face; on hardware, a plain tap's
-//    own vibration was enough to cross is_moving's threshold, so
-//    pressing tap-to-pause was intermittently read as a full reset
-//    instead. Fixed by comparing quantized to current_face_ directly
-//    instead of resetting unconditionally on every settle.
+// 3. Taps are forwarded unconditionally, not gated on is_moving — a tap
+//    landing mid-flip just toggles the pre-flip face and gets
+//    overwritten by onEnter()'s reset if a genuine flip is confirmed.
 //
-//    Second version (still buggy, fixed 2026-08-24) additionally required
-//    catching is_moving==true at some point before allowing the commit,
-//    on the theory that this would filter out spurious settle events.
-//    That extra gate was redundant — QuantizeFace's 80-degree hysteresis
-//    is already proof real movement happened — and it broke on a slow
-//    final correction across the boundary that never exceeded the
-//    is_moving gyro-rate threshold: the commit was gated behind a latch
-//    that only a fast-enough motion could set, so a gentle return to a
-//    face stayed stuck until some later unrelated fast flip happened to
-//    re-arm it. Fixed by comparing quantized to current_face_ directly,
-//    still gated on `!attitude.is_moving` (only commit once settled).
+// 4. `current_` is not expected to be null in normal operation.
 //
-//    Third version (2026-08-25): dropped the `!attitude.is_moving` gate
-//    entirely — commits the instant quantized disagrees with
-//    current_face_, moving or not. That gate was originally kept as a
-//    hedge against gyro angle overshoot during a flip (pre gyro-scale-fix
-//    /alpha-tuning, a fast rotation could transiently read 30-40 degrees
-//    past true, so switching mid-motion risked triggering on a bogus
-//    reading); once that overshoot was fixed, the user tried removing it
-//    on hardware and preferred the immediate feel. QuantizeFace's own
-//    80-degree hysteresis still rejects resting noise on its own — the
-//    is_moving gate was redundant on top of it, same shape of fix as the
-//    latch removal above. Trade-off accepted: a fast swipe that passes
-//    *through* a face's zone on the way to another one now commits (and
-//    resets) that passed-through face too, not just the final settled
-//    one. Boot is bootstrapped via `!current_` (no face exists yet)
-//    rather than a separate "always commit once" flag.
+// 5. Brightness/notification state machine, driven off TimerFace::Status
+//    each tick plus attitude.is_moving — an `interacting` flag folds
+//    tapping, flipping, and idle rotation together:
+//      - face entry: snap to full bright
+//      - interacting while running: snap to full bright, restart the
+//        ~10s fade toward the dimmed level
+//      - break phase: stays fully bright for the whole phase, no fade
+//      - last ~30s of a focus-like phase: ramps UP to full bright within
+//        ~3s and holds until the phase changes, not interrupted by
+//        movement
+//      - interacting while paused: snap to full bright, restart the
+//        idle-sleep countdown
+//      - paused with no interaction for kIdlePreDimHoldMs: fast-fade to
+//        off over kIdleFadeToOffMs, then hold off for kIdleOffHoldMs —
+//        ShouldEnterIdleSleep() goes true once the whole ~18s sequence
+//        elapses. main.cpp checks this every tick and, once true, calls
+//        the blocking RunIdleSleep() then NotifyWokeFromIdleSleep().
+//    TimerFace/AttitudeEstimator have no notion of brightness.
 //
-// 3. Taps are forwarded unconditionally — NOT gated on is_moving (that
-//    was the first version's attempted fix for accidental tap-engine
-//    triggers mid-flip, but it made legitimate taps near a settle feel
-//    unresponsive, and is no longer needed: with (2) fixed, a tap that
-//    lands during real motion just toggles the pre-flip face, and gets
-//    overwritten by onEnter()'s reset moments later if a genuine flip is
-//    confirmed anyway).
+// 6. Tap mute window: OnTap() is ignored for kTapMuteAfterSwitchMs after
+//    a face switch commits — a flip often lands with residual wobble
+//    that would otherwise immediately start the timer on the face just
+//    arrived at. Armed only on a face-switch commit (not on any
+//    is_moving blip — a light tap alone can cross that threshold too),
+//    and only counts down while !attitude.is_moving. Orthogonal to the
+//    tap engine's own detection windows in main.cpp's ConfigureTap call.
 //
-// 4. Face D's behavior was undecided for a while (plan: undecided, deferred),
-//    backed in the meantime first by ReservedFace (a placeholder that
-//    just rendered "Reserved") and then briefly by a second PomodoroFace
-//    instance for fast iteration on the M7 brightness/notification work.
-//    Settled 2026-08-30: BreathFace, a guided 4-7-8-style breathing
-//    exercise — see its own header for why it's a distinct class rather
-//    than another PomodoroFace variant. `current_` is not expected to be
-//    null in normal operation.
+// 7. Outer progress ring, a second notification channel alongside
+//    brightness. Visible arc tracks progress clockwise from 12 o'clock:
+//      - Countdown (Status::has_target): starts full and erodes —
+//        elapsed_fraction = 1 - remaining_ms/target_ms.
+//      - Count-up (Status::is_count_up): grows from empty, one
+//        revolution per hour — elapsed_fraction = (elapsed_ms mod 1h)/1h.
+//      - Neither flag set: ring hidden.
+//    The tick mark rides the same moving-edge angle. Ring freezes (does
+//    not reset) on pause — the tick signals running/paused instead, with
+//    three states: fresh/unstarted (hidden), running (steady), paused
+//    with real progress (hard blink, kRingBlinkHalfPeriodMs). Orientation
+//    re-snaps to the current face (GuiManager::SetRingOrientation()) once
+//    per face-switch commit, not every tick.
 //
-// 5. Brightness/notification state machine (M7, plan's "brightness as
-//    the notification system"), driven off TimerFace::Status polled
-//    each tick (is_running true->false/false->true, remaining_ms
-//    jumping up = a new phase started) PLUS attitude.is_moving (added
-//    2026-08-25) — a single
-//    `interacting` flag folds all of these together: "the user is
-//    engaging with the device right now", whether that's tapping,
-//    flipping faces, or just spinning it in their hand without crossing
-//    a face boundary:
-//      - face entry (onEnter() just called): snap to full bright,
-//        regardless of the new face's initial is_running (always paused
-//        on entry, but a flip should read as an obvious bright event) —
-//        handled directly in Update(), not part of `interacting` below
-//      - interacting while running: snap to full bright and restart the
-//        ~10s linear fade toward a dimmed level — so idly spinning the
-//        device to watch the rotation animation, with no face change,
-//        doesn't let the screen dim out from under you
-//      - break phase (Status::is_break_phase): stays fully bright for the
-//        entire phase, no fade — accepted battery cost for now, revisit
-//        once real battery life is measured (M9)
-//      - last ~30s of a focus-like (non-break) phase with a target
-//        duration: ramps UP to full bright, reaching it within ~3s
-//        (faster than the ~10s dim-fade, so it reads as a distinct
-//        event) and holding there until the phase actually changes —
-//        deliberately NOT interrupted by mere movement, since drawing
-//        attention is the whole point of this window. Replaces an
-//        earlier breathing dark-bright-dark pulse design (2026-08-25,
-//        user's redesign after using it) — ramping toward brighter reads
-//        more clearly and is easier on the eyes than oscillating. The
-//        warm/red color tint that used to accompany this was dropped the
-//        same day to keep the notification channel to brightness alone
-//        for now — GuiManager::SetWarmth() still exists if it comes back
-//      - interacting while paused: snap to full bright and restart the
-//        idle-sleep countdown below
-//      - paused with no interaction for kIdlePreDimHoldMs (2026-09-06,
-//        replaces an earlier minutes-scale "dim to off" timeout that
-//        never got past a first draft): fast-fade to fully off over
-//        kIdleFadeToOffMs, then hold off for kIdleOffHoldMs more —
-//        ShouldEnterIdleSleep() becomes true once that whole sequence
-//        (kIdlePreDimHoldMs+kIdleFadeToOffMs+kIdleOffHoldMs, ~18s) has
-//        elapsed. main.cpp's loop checks this every tick and, once true,
-//        calls the blocking RunIdleSleep() (sleep_mode.hpp) and then
-//        NotifyWokeFromIdleSleep() once it returns. Reuses
-//        paused_elapsed_ms_ directly rather than a separate timer field —
-//        it already tracks exactly "ms continuously paused, reset on any
-//        interaction", which is exactly what this needs too.
-//    TimerFace never sees any of this — GetStatus() is facts only;
-//    AttitudeEstimator likewise has no notion of brightness.
+// 8. PomodoroFace's phase-transition caption lives entirely in
+//    pomodoro_face.hpp — orthogonal to the ring above; neither knows
+//    about the other.
 //
-// 6. Tap mute window (2026-08-25): OnTap() is ignored for
-//    kTapMuteAfterSwitchMs after a face switch settles — the user found
-//    a flip often lands with enough residual wobble/vibration to trip
-//    the tap engine an instant later, immediately starting the timer on
-//    a face they just arrived at (expected to get worse once the device
-//    is inside an enclosure, more surface area to knock). tap_mute_
-//    remaining_ms_ is armed to the window length on every face commit,
-//    but only counts down while !attitude.is_moving — commits fire the
-//    instant quantized changes (design note 2), often still mid-swing,
-//    so counting down unconditionally from the commit moment could burn
-//    through most of the window before the device actually stops moving,
-//    which is when the residual-vibration risk this exists for actually
-//    starts. Holding the countdown at full while still moving means the
-//    whole window applies from the moment it's needed. OnTap() no-ops
-//    while it's nonzero.
+// 9. Idle sleep: once ShouldEnterIdleSleep() goes true, main.cpp switches
+//    the IMU into Wake-on-Motion mode and calls the blocking
+//    RunIdleSleep(imu) (repeated real light sleeps), then restores the
+//    tap engine and calls NotifyWokeFromIdleSleep(). Light sleep, not
+//    deep sleep, so current_'s state and the fused angle are simply
+//    still there on return.
 //
-//    Briefly generalized (same day) to arm/hold on *any*
-//    attitude.is_moving, not just a face-switch commit, on the theory
-//    that any handling deserves the same grace period. Reverted after
-//    hardware testing: a light finger tap on the screen alone was enough
-//    to flip is_moving 0->1->0 (matches design note 2's history — a
-//    tap's vibration crossing is_moving isn't hypothetical on this
-//    hardware, it's already caused one bug before). Under the
-//    any-movement version that re-arms the mute window from the tap's
-//    own vibration, making the timer noticeably harder to trigger by
-//    tapping at all, not just a rare rapid-retap edge case. Scoping the
-//    arm back to face-switch commits avoids this: it doesn't re-arm from
-//    an ordinary tap's own is_moving blip once the window has already
-//    reached 0, since nothing there triggers on is_moving alone.
+//    WoM wakes on any sufficiently large accelerometer slope, not
+//    specifically a tap, so whatever woke RunIdleSleep() is consumed
+//    internally and never forwarded to OnTap() — the device always comes
+//    back paused, requiring a distinct subsequent tap to resume.
 //
-//    Deliberately app-level and orthogonal to the tap engine's own
-//    internal detection windows
-//    (peak_window/tap_window/d_tap_window in main.cpp's ConfigureTap
-//    call) — those shape what counts as a tap at all, this just ignores
-//    genuine taps for a moment after a flip.
+//    Double-tap-to-wake: a WoM trigger alone doesn't wake the device —
+//    it's a silent pre-wake (screen stays off) until a second, genuinely
+//    separate tap lands within kWomConfirmWindowMs. Only that combination
+//    calls NotifyWokeFromIdleSleep(). Resuming a paused timer from full
+//    idle sleep is three taps total: two to wake the screen, one more to
+//    start it.
 //
-// 7. Outer ring (2026-08-25, "UI polish" pass; redesigned 2026-09-09 into
-//    a progress ring): a second notification channel alongside
-//    brightness — GuiManager's ring_/ring_tick_ (see their header
-//    comment). Original (2026-08-25/26) meaning — solid while paused,
-//    a closing-seconds breathing cue while running near the end,
-//    otherwise hidden — replaced entirely: the user wanted the ring to
-//    show *actual progress*, not just a late-stage cue.
+// 10. Battery-check gesture: holding the device tilted out of the
+//     tracked plane (AttitudeEstimator::Output::in_valid_plane false,
+//     hysteresis-debounced at the source) for kBatteryViewEnterMs shows a
+//     5-block gauge instead of the current face; holding it back in-plane
+//     for kBatteryViewExitMs returns to normal. Not a Face:
+//     showing_battery_ doesn't touch current_/current_face_ — the
+//     underlying face keeps ticking, only render() is swapped
+//     (GuiManager::ShowBatteryView()) and face-switch/tap logic is
+//     suppressed. BatteryVoltageToFilledBlocks() (app_controller.cpp)
+//     does a plain linear split of the LiPo's 3.0-4.2V usable range
+//     across the 5 blocks — not lab-accurate, good enough for an
+//     at-a-glance gauge. Runs its own idle-sleep timeline
+//     (battery_view_idle_elapsed_ms_) so leaving the device tilted
+//     doesn't keep it lit indefinitely; unlike the low-battery screen
+//     below, the underlying face is left running, not force-paused.
 //
-//    New meaning: the ring's visible arc directly tracks how far through
-//    the current phase (or, for a count-up face, the current hour) things
-//    are, clockwise from 12 o'clock:
-//      - Countdown (TimerFace::Status::has_target — PomodoroFace,
-//        BreathFace's every phase including kReady): starts as a full
-//        circle and *erodes* — the eaten portion (gone, starting at 12
-//        o'clock) grows clockwise as remaining_ms falls, reaching fully
-//        empty exactly at remaining_ms=0. elapsed_fraction =
-//        1 - remaining_ms/target_ms (target_ms is new on Status, 2026-09-09
-//        — the ring needs the phase's *original* duration, which
-//        remaining_ms alone can't supply).
-//      - Count-up (Status::is_count_up — StopwatchFace only): the
-//        opposite shape, *grows* from nothing at 12 o'clock, one full
-//        revolution per hour, wrapping back to empty and starting over —
-//        elapsed_fraction = (elapsed_ms mod 1 hour) / 1 hour. remaining_ms
-//        is repurposed on Status to carry elapsed_ms for this case (see
-//        its own field comment) since it's otherwise unused/meaningless
-//        for a face with no target.
-//      - Neither flag set (BreathFace's true kIdle screen; no current_ at
-//        all) — GuiManager::SetRingVisible(false), no progress to show.
+// 11. Low-battery warning screen — stage 1 of the two-stage low-battery
+//     safety net (stage 2, forced deep sleep, lives entirely in main.cpp
+//     since it's a reboot-based mechanism with nothing for AppController
+//     to own). Voltage-driven: evaluated every tick against
+//     battery_voltage_v_ with its own hysteresis pair
+//     (kLowBatteryEnterV/kLowBatteryExitV). showing_low_battery_ forces a
+//     "please charge" screen over whatever was showing, and is NOT exempt
+//     from idle-sleep the way showing_battery_ is — staying lit
+//     indefinitely works against the point of the screen. Runs the same
+//     bright-hold/fade/dim-hold/cut-to-off timeline as design note 5
+//     against its own low_battery_idle_elapsed_ms_ counter.
+//     UpdateLowBatteryHysteresis() force-pauses a running timer on entry
+//     (synthetic onTap()) and OnTap() swallows real taps while the screen
+//     is showing.
 //
-//    Both shapes share the exact same "moving edge" angle
-//    (elapsed_fraction*360 degrees clockwise from 12), which is also
-//    where the small tick mark (ring_tick_) sits — GuiManager's
-//    SetRingProgress() positions both from that one angle each call, see
-//    its own comment for the eroding-vs-growing arc-placement difference.
-//    The ring itself is a pure function of Status each tick (elapsed_ms/
-//    remaining_ms/target_ms), same as before — no state of its own beyond
-//    what GuiManager's own dirty-check needs.
-//
-//    Tick geometry (2026-09-09, revised same day from hardware feedback):
-//    reaches inward from the ring toward the center (kRingTickWidthPx,
-//    roughly a fifth of kRingRadiusPx), not outward past the ring's outer
-//    edge — first version poked outward, user wanted the opposite
-//    direction.
-//
-//    Per-face orientation (2026-09-09, same feedback round): the ring's
-//    own "12 o'clock" now re-snaps to match whichever face is showing —
-//    GuiManager::SetRingOrientation(FaceCenterDeg(current_face_)), called
-//    once at every face-switch commit (see Update() below), not every
-//    tick. First version left the ring's rotation fixed at face B's
-//    orientation always, so on any other face its 12 o'clock pointed
-//    somewhere that wasn't actually "up" for that face's own upright
-//    content — e.g. on face A (FaceCenterDeg=-90, reached by rotating the
-//    device 90 degrees/CW from B as of 2026-09-11's CCW-positive
-//    screen_angle_deg convention — was CCW pre-flip, same -90 number both
-//    times; see FaceCenterDeg's own comment in app_controller.cpp for why
-//    the number stayed pinned to content instead of following the sign
-//    flip), the fixed reference physically landed at what would be B's
-//    own 9 o'clock. Re-snapping per face,
-//    instead of continuously tracking screen_angle_deg the way root_
-//    does, keeps this off the transform/matrix crash path (see
-//    GuiManager's class doc) while still reading correctly once a flip
-//    settles.
-//
-//    Running vs paused — the ring freezes at whatever erosion/growth
-//    state it was at, it does NOT restore/reset on pause (that was an
-//    explicit requirement: pausing right at the very start of a countdown
-//    must not look identical to a fresh, never-started one). The *tick*
-//    is what signals running vs paused instead, and goes through three
-//    states rather than two (2026-09-09, final form after two rounds of
-//    hardware feedback):
-//      - Fresh, never (yet) started — elapsed_fraction==0, whether that's
-//        a just-entered face or a phase that just auto-advanced (e.g.
-//        focus->break): tick hidden entirely (opacity 0). The ring itself
-//        (a full or empty circle, unambiguous on its own depending on
-//        mode) is already a clear enough "this is fresh" signal without
-//        the tick doing anything on top of it.
-//      - Running: tick visible, steady/full opacity, riding the moving
-//        edge.
-//      - Paused with real progress already made (elapsed_fraction > 0):
-//        tick blinks, hard on/off (kRingBlinkHalfPeriodMs — see its own
-//        comment for why this ended up a flat blink rather than a smooth
-//        fade, after two earlier attempts at the latter).
-//    First version (screen-off / vanish while paused, no blink at all)
-//    read as not obvious enough on hardware — a blink is a much stronger
-//    cue than presence-vs-absence, the classic VCR/DVD "steady while
-//    playing, blinking while paused" convention.
-//
-//    Can't reuse remaining_ms to drive the blink's phase the way the
-//    ring's old breathing effect drove its wave off
-//    `remaining_ms % kRingBreathPeriodMs` — remaining_ms is frozen while
-//    paused, which is the whole point here. ring_pause_blink_elapsed_ms_
-//    is a real wall-clock accumulator instead (advances by dt_ms only
-//    while genuinely blinking, reset to 0 in both other states — running,
-//    or fresh-and-unstarted — so a later real pause always starts its
-//    blink "on" rather than resuming wherever an earlier pause happened
-//    to leave off).
-//
-//    BreathFace's render() used to override the ring itself right after
-//    UpdateRing() ran (a bespoke rise/hold/fall opacity envelope, "the
-//    ring IS the exercise") — removed 2026-09-09: the new generic
-//    countdown ring already does the same job (every breath phase has a
-//    real target_ms), just running faster since these phases are seconds
-//    long, not minutes. One mechanism for every has_target face now,
-//    instead of PomodoroFace/generic-countdown using one and BreathFace
-//    quietly overriding it with another.
-//
-// 8. Phase-transition caption (2026-08-26): entirely inside PomodoroFace,
-//    not AppController — see pomodoro_face.hpp's transition_remaining_ms_
-//    field comment. Mentioned here only because design note 7 above
-//    references it: the two features share a screen but were built to be
-//    fully orthogonal (the caption doesn't know the ring exists, and vice
-//    versa), which is what let each one get simplified/fixed
-//    independently without touching the other.
-//
-// 9. Idle sleep (2026-09-06, M9): the ~18s paused/idle sequence described
-//    in design note 5 ends with ShouldEnterIdleSleep() going true, at
-//    which point main.cpp switches the IMU into Wake-on-Motion mode
-//    (Qmi8658::EnterWakeOnMotion() — see its comment for why WoM, not the
-//    tap engine: a real tap's INT2 signal is a brief pulse, too short for
-//    light sleep's GPIO wakeup to reliably catch on real hardware, where
-//    WoM's held-level signal isn't) and calls the blocking
-//    RunIdleSleep(imu) (sleep_mode.hpp) — repeated real light sleeps,
-//    each one either woken directly by a motion event on IMU_INT2 or a
-//    ~1s backstop timer — followed by restoring the tap engine and
-//    NotifyWokeFromIdleSleep() once it returns. Deliberately NOT deep
-//    sleep: light sleep resumes execution right where RunIdleSleep() left
-//    off rather than rebooting, so current_'s face/phase/remaining time
-//    and AttitudeEstimator's angle are simply still there when we come
-//    back — no state to save or restore. See
-//    gravity_timer_project_plan.md's M9 notes for the fuller comparison
-//    against *deep* sleep + Wake-on-Motion (blocked there specifically:
-//    IMU_INT1/INT2 aren't wired to an RTC-capable GPIO, which deep
-//    sleep's ext0/ext1 wakeup requires but light sleep's GPIO wakeup
-//    doesn't — that's what makes WoM usable here at all) and deep sleep +
-//    ULP-RISC-V bit-bang I2C (works, but far more implementation/
-//    debugging cost for savings that are hard to feel against this
-//    path's already-huge improvement).
-//
-//    Motion-only wake (2026-09-06, was tap-only, was tap-or-rotation
-//    before that): trade-off accepted knowingly — WoM wakes on any
-//    sufficiently large accelerometer slope, not specifically a tap
-//    (being picked up, the desk being knocked, etc. all wake it too).
-//    Whatever event caused RunIdleSleep() to return is consumed by that
-//    function itself — it's never forwarded to OnTap() — so the device
-//    always comes back paused, never straight into running. Reaching in
-//    and toggling running_ requires a distinct, subsequent tap once back
-//    in the normal loop. Deliberate: resuming a timer just because the
-//    device woke up would mean an incidental bump could silently start a
-//    session — and matters more now than it did for tap-only wake, since
-//    a wider set of events can trigger this wake at all.
-//
-//    Double-tap-to-wake (2026-09-07): the trade-off above turned out to
-//    bite harder than expected on real hardware — even with
-//    Qmi8658::EnterWakeOnMotion()'s threshold maxed out at the register's
-//    255 ceiling, an incidental hand bump near the device was still
-//    enough to trigger a wake. Fixed one level below this class, entirely
-//    inside main.cpp's idle-sleep block: a WoM trigger no longer wakes on
-//    its own. It's a silent pre-wake — screen stays off, ShouldEnterIdleSleep()
-//    stays satisfied — until a second, genuinely separate tap lands within
-//    a short window (kWomConfirmWindowMs) right after. Only that combination
-//    calls NotifyWokeFromIdleSleep(). This is now a deliberate two-tap
-//    wake gesture, not just a debounce — a single tap can't satisfy both
-//    stages back-to-back on this hardware (the tap engine isn't running
-//    yet at the instant of the physical tap; still in WoM mode until
-//    RunIdleSleep() returns), so waking the device for real always takes
-//    two distinct taps: one to leave WoM/light-sleep, one to confirm.
-//    Combined with the "distinct subsequent tap to resume" rule just
-//    above, running a paused timer from a full idle sleep now takes
-//    three taps total: two to wake the screen, one more to actually
-//    start it — all in service of the same goal, an incidental bump
-//    should never be mistaken for intent.
-//
-// 10. Battery-check gesture (2026-09-08): picking the device up and
-//     holding it (tilting it out of the tracked rotation plane —
-//     AttitudeEstimator::Output::in_valid_plane going false, now
-//     hysteresis-debounced at the source, see that class's
-//     kAzInvalidEnterThresholdG/kAzValidReturnThresholdG) for
-//     kBatteryViewEnterMs shows a 5-block battery-level gauge instead of
-//     the current face; holding the device back in-plane for
-//     kBatteryViewExitMs returns to normal. Deliberately NOT a Face:
-//     showing_battery_ doesn't touch current_/current_face_ at all — the
-//     underlying face's onTick() keeps running the whole time (a
-//     Pomodoro phase keeps counting down while you check the battery),
-//     only render() is swapped out (GuiManager::ShowBatteryView()) and
-//     face-switch/tap logic is suppressed for the duration, same "nothing
-//     to save/restore" shape as idle sleep (design note 9) — there's just
-//     nothing state-worthy about "the screen currently shows a different
-//     thing".
-//
-//     Why hysteresis had to move into AttitudeEstimator rather than
-//     living here like the other debouncing in this file
-//     (kFaceHysteresisLeaveDeg, kTapMuteAfterSwitchMs): those work on a
-//     single already-hysteresis'd or edge-triggered signal, but
-//     in_valid_plane wasn't hysteresis'd at all before this — a plain
-//     single-threshold boolean bouncing across its boundary would keep
-//     resetting battery_view_hold_ms_'s accumulation to 0, since this
-//     class only sees the boolean, not the underlying |AZ| value needed
-//     to build a band on top of it. Fixing it at the source also quietly
-//     improves AttitudeEstimator's own internal accel-trust fallback
-//     (Update()'s in_valid_plane branch), which had the identical
-//     boundary-chatter exposure already, just never mattered enough to
-//     notice before this.
-//
-//     Entry threshold intentionally not a small resting tilt (0.7g) —
-//     this is meant to require a real "pick it up and hold it at an
-//     angle" motion, not fire from a light nudge. Exit threshold (0.3g)
-//     matches the original pre-hysteresis single value, chosen to make
-//     returning to normal comparatively easy once you set the device back
-//     down.
-//
-//     Battery level (2026-09-11): real ADC reading, not a stub anymore —
-//     main.cpp owns a BatteryMonitor (battery_monitor.hpp, GPIO1/ADC1_CH0,
-//     see hardware_pinout.md's "Battery ADC" row) and calls
-//     SetBatteryVoltage() on its own slow cadence (kBatteryReadPeriodUs,
-//     not every sensor tick — a voltage reading has no reason to be as
-//     fresh as attitude). BatteryVoltageToFilledBlocks() (app_controller.cpp)
-//     does the actual voltage->gauge-level mapping: a plain linear split
-//     of the LiPo's 3.0-4.2V usable range (gravity_timer_project_plan.md's
-//     own numbers) across the 5 blocks — a real LiPo's discharge curve is
-//     nonlinear (flatter in the middle, steeper at both ends), so this
-//     reads a bit optimistic through the flat middle stretch and a bit
-//     pessimistic right at the ends; good enough for an at-a-glance gauge,
-//     not treated as a lab-accurate percentage anywhere else.
-//
-//     Gap closed 2026-09-11: this view used to hold brightness at a flat
-//     1.0f with no idle-sleep countdown of its own at all — pick the
-//     device up to check the gauge, then leave it tilted without setting
-//     it back down or otherwise interacting, and it would just stay lit
-//     indefinitely. Now runs the exact same bright-hold/fade/dim-hold/
-//     sleep timeline as everything else, via its own
-//     battery_view_idle_elapsed_ms_ counter (see design note 11, which
-//     added the shared IdleBrightnessCurve() helper this reuses, and
-//     which the same fix was made for). Unlike design note 11's screen,
-//     the underlying face is left running here, not force-paused — a
-//     quick glance at the battery gauge isn't the same kind of "stop
-//     what you're doing" event a critically low battery is.
-//
-// 11. Low-battery warning screen (2026-09-11) — stage 1 of the plan-doc's
-//     two-stage low-battery safety net. Stage 2 (forced deep sleep below
-//     a lower threshold, no tap/wake accepted — 2026-09-12) lives entirely
-//     in main.cpp, not here: it's a full reboot-based mechanism
-//     (kCriticalBatteryEnterV/in_critical_battery_sleep, see their own
-//     comments there) with nothing for AppController to own, unlike this
-//     stage which is all in-process state. Voltage-driven, not
-//     gesture-driven like design note 10's battery-check view: evaluated
-//     every tick against battery_voltage_v_ with its own hysteresis pair
-//     (kLowBatteryEnterV/kLowBatteryExitV — same enter-high/exit-lower
-//     shape as kAzInvalidEnterThresholdG/kAzValidReturnThresholdG in
-//     AttitudeEstimator, same reason: avoid flip-flopping right at a
-//     boundary). showing_low_battery_ forces a "please charge" screen
-//     over whatever face/phase was showing — deliberately NOT exempt from
-//     idle-sleep the way showing_battery_ is: staying fully bright
-//     indefinitely while already low on charge works against the exact
-//     thing this screen exists to protect ("staying lit the whole time
-//     doesn't actually help the battery" — the user's own framing). Runs
-//     its own copy of design note 5's
-//     bright-hold/fade/dim-hold/cut-to-off timeline
-//     (kIdlePreDimHoldMs/kIdleFadeToDimMs/kIdleDimHoldMs/
-//     kIdleSleepThresholdMs, reused as-is) against a separate
-//     low_battery_idle_elapsed_ms_ counter rather than paused_elapsed_ms_,
-//     since there's no TimerFace::Status to derive is_running/just_paused
-//     from here — attitude.is_moving resets it (mirrors design note 5's
-//     "spinning it in their hand" case), and OnTap() has its own
-//     early-return branch (matching showing_battery_'s — see OnTap())
-//     that resets it and swallows the tap rather than forwarding to
-//     current_->onTap(), same "don't let incidental interaction reach the
-//     hidden face" reasoning as design note 9's wake-tap handling.
-//
-//     Countdown lock below kCriticalBatteryEnterV (2026-09-12, user's own
-//     safety concern): once voltage is this low, *neither* of those two
-//     resets is allowed to fire anymore — Update() and OnTap() both check
-//     battery_voltage_v_ < kCriticalBatteryEnterV first and skip their
-//     reset when true, so low_battery_idle_elapsed_ms_ counts straight
-//     down to kIdleSleepThresholdMs no matter how much the device is
-//     picked up, shaken, or tapped. Without this, someone (deliberately
-//     or not) keeping the device in continuous motion could hold it in
-//     active operation indefinitely below the voltage this project's own
-//     research already flagged as the edge of real, permanent LiPo
-//     damage — the exact outcome stage 2's "no tap/wake accepted" design
-//     already exists to prevent, just from the other end (this closes the
-//     approach to it, not just the exit). Above kCriticalBatteryEnterV
-//     but still below kLowBatteryEnterV, interaction resetting the timer
-//     stays exactly as before — there's real margin there, and letting
-//     the warning stay bright while being handled is still useful.
-//     Unlike design note 10's battery-check view, a running timer is NOT
-//     just left ticking silently underneath — UpdateLowBatteryHysteresis()
-//     force-pauses it (a synthetic onTap() the instant showing_low_battery_
-//     becomes true, since every face's onTap() while running_ means
-//     "pause" by their own shared convention) and it can't be resumed by
-//     tapping until the warning clears, since OnTap() swallows every real
-//     tap in the meantime. current_->onTick() is still called every tick
-//     regardless (harmless no-op while paused, keeps e.g. BreathFace's
-//     unconditional done-caption countdown correct). Shares the exact
-//     brightness curve math with
-//     UpdateBrightness()'s paused-idle fade via a small free function
-//     (IdleBrightnessCurve() in app_controller.cpp) rather than
-//     duplicating it a second time. Feeds into ShouldEnterIdleSleep() and
-//     NotifyWokeFromIdleSleep() alongside paused_elapsed_ms_ so main.cpp's
-//     existing RunIdleSleep()/WoM-wake machinery (design note 9) handles
-//     this case for free — no changes needed there. kLowBatteryEnterV/
-//     kLowBatteryExitV are starting guesses, not tuned against real
-//     hardware yet. The visual (kLowBatteryColor, orange-amber — adjusted
-//     once from the original plain "Charge" in warning red) is confirmed
-//     triggering correctly on real hardware (2026-09-12, first real
-//     low-battery event on a test cell), but the text needed a second
-//     pass: "Low\nBattery" as one 2-line primary string clipped its own
-//     top line on real hardware (a label auto-resize/realign bug, not a
-//     root_ clipping issue — see GuiManager::SetPrimaryText()'s comment),
-//     so this now splits "Low" (SetSecondaryText) / "Battery"
-//     (SetPrimaryText) across the two already-single-line labels instead.
+//     Countdown lock below kCriticalBatteryEnterV: once voltage is this
+//     low, neither motion nor a tap resets low_battery_idle_elapsed_ms_
+//     anymore — it counts straight down regardless of interaction, so
+//     the device can't be kept awake indefinitely below the voltage
+//     where continued operation risks real LiPo damage. Above
+//     kCriticalBatteryEnterV but still below kLowBatteryEnterV,
+//     interaction resets the timer as usual.
 //
 // AttitudeEstimator is NOT held by reference here — main.cpp calls
 // AttitudeEstimator::Update() once per tick (single call site, avoids
@@ -494,18 +142,8 @@ public:
     enum class Face { kA, kB, kC, kD };
 
     // Stage 2 of the low-battery safety net's entry threshold — the
-    // actual deep-sleep trigger lives in main.cpp (kCriticalBatteryExitV
-    // sits there too, unneeded here — AppController never sees the exit
-    // side, that only matters in the special minimal-boot recheck path,
-    // which doesn't construct an AppController at all), but this class
-    // needs the SAME number for design note 11's "countdown can't be
-    // reset once critical" rule below, and the two must never drift apart
-    // from each other — a mismatch here would mean either the countdown
-    // locks before main.cpp is actually ready to act on it, or main.cpp
-    // deep-sleeps while the countdown could still have been reset out
-    // from under it. Public and named identically to main.cpp's own
-    // (removed) copy so that file references this one instead of keeping
-    // a second literal in sync by hand.
+    // actual deep-sleep trigger lives in main.cpp, which reads this same
+    // constant so the two can't drift apart.
     static constexpr float kCriticalBatteryEnterV = 3.0f;
 
     explicit AppController(GuiManager& gui_manager);
@@ -532,10 +170,8 @@ public:
     void NotifyWokeFromIdleSleep();
 
     // Caches the latest real battery voltage (main.cpp reads
-    // BatteryMonitor on its own slow cadence, not every sensor tick — see
-    // main.cpp's kBatteryReadPeriodUs) for UpdateBatteryView()/Update() to
-    // convert into a gauge level next time the battery view actually
-    // renders. Replaces kStubBatteryFilledBlocks — see design note 10.
+    // BatteryMonitor on its own slow cadence, not every sensor tick) for
+    // the battery gauge / low-battery screen to use.
     void SetBatteryVoltage(float voltage_v) { battery_voltage_v_ = voltage_v; }
 
 private:
@@ -547,7 +183,7 @@ private:
     void UpdateLowBatteryHysteresis();  // see design note 11 above — just flips showing_low_battery_, no rendering
 
     GuiManager& gui_manager_;
-    std::unique_ptr<TimerFace> current_;  // nullptr while on face D
+    std::unique_ptr<TimerFace> current_;
     Face current_face_ = Face::kA;         // confirmed face; meaningless until current_ is set
 
     float brightness_ = 1.0f;
@@ -559,17 +195,12 @@ private:
 
     uint32_t tap_mute_remaining_ms_ = 0;  // see design note 6
 
-    uint32_t ring_pause_blink_elapsed_ms_ = 0;  // see design note 7 — real wall-clock ms, not tied to remaining_ms
+    uint32_t ring_pause_blink_elapsed_ms_ = 0;  // real wall-clock ms, not tied to remaining_ms
 
     bool showing_battery_ = false;         // see design note 10
     uint32_t battery_view_hold_ms_ = 0;    // ms continuously in the state opposite showing_battery_'s current value
-    uint32_t battery_view_idle_elapsed_ms_ = 0;  // ms continuously shown, drives the same fade/sleep curve as paused_elapsed_ms_ — 2026-09-11
-    // Defaults to a "full" reading, not 0 — harmless (shows one frame of
-    // "full" instead of an alarming "empty" if the battery view somehow
-    // renders before main.cpp's first real BatteryMonitor::ReadVoltage()
-    // lands), same spirit as the other graceful-default fields in this
-    // codebase (e.g. nvs_calibration.hpp's face_a_offset_deg=0).
-    float battery_voltage_v_ = 4.2f;
+    uint32_t battery_view_idle_elapsed_ms_ = 0;  // ms continuously shown, drives the same fade/sleep curve as paused_elapsed_ms_
+    float battery_voltage_v_ = 4.2f;  // defaults to "full", not 0 — avoids an alarming false-empty reading before the first real ADC read
 
     bool showing_low_battery_ = false;         // see design note 11
     uint32_t low_battery_idle_elapsed_ms_ = 0;  // ms continuously shown, drives the same fade/sleep curve as paused_elapsed_ms_

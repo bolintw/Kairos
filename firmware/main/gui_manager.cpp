@@ -13,27 +13,17 @@ float Clamp01(float v)
     return v;
 }
 
-// See gui_manager.hpp's rotation design note. -1.0f -> +1.0f (2026-09-11):
-// AttitudeEstimator's screen_angle_deg flipped from CW-positive to
-// CCW-positive (attitude_estimator.hpp/.cpp) — this needs to flip in
-// lockstep to keep counter-rotating correctly, since LVGL's own rotation
-// API is fixed CW-positive regardless of our convention. Confirmed this
-// pairing keeps root_/ring_ physically unchanged (same rendered angle for
-// any given physical orientation, only screen_angle_deg's own sign
-// changed) — see app_controller.cpp's matching FaceCenterDeg swap.
+// Converts AttitudeEstimator's CCW-positive screen_angle_deg into LVGL's
+// fixed CW-positive transform_rotation before negating it to counter-rotate.
 constexpr float kRotationSign = 1.0f;
 
-// See SetRotationDeg()'s comment — a floor on how often the expensive
-// rotated redraw is allowed to fire, independent of the sensor tick rate
-// (which this whole mechanism exists to stop throttling). ~30Hz: fast
-// enough that a flip still reads as smooth motion, far below the 120Hz
-// sensor rate this is decoupling the redraw cost from.
+// Floor on how often the expensive rotated redraw is allowed to fire,
+// independent of the sensor tick rate. ~30Hz: fast enough to read as
+// smooth motion.
 constexpr int64_t kRotationUpdateMinIntervalUs = 33 * 1000;
 
-// Battery icon geometry (2026-09-11, replacing the full-panel horizontal
-// band design — see kBatteryBlockCount's header comment) — a literal
-// horizontal battery icon per the user's reference image: a gray outline
-// rect with a small terminal nub on the right, kBatteryBlockCount vertical
+// Battery icon geometry — a horizontal battery icon: a gray outline rect
+// with a small terminal nub on the right, kBatteryBlockCount vertical
 // segments inside filling left-to-right. Centered on the panel.
 constexpr int32_t kBatteryIconWidthPx = 150;
 constexpr int32_t kBatteryIconHeightPx = 70;
@@ -64,11 +54,7 @@ constexpr int32_t kBatterySegCornerRadiusPx = 3;
 constexpr lv_color_t kBatteryGray = LV_COLOR_MAKE(140, 140, 140);
 constexpr lv_color_t kBatteryEmptyGray = LV_COLOR_MAKE(60, 60, 60);
 
-// One fixed color per fill count, red (1 segment) -> green
-// (GuiManager::kBatteryBlockCount segments) — see SetBatteryLevel()'s
-// header comment for why this is a single accent color per level rather
-// than a per-segment gradient. Starting palette, not tuned against the
-// real panel yet. Unchanged by the 2026-09-11 band->icon redesign.
+// One fixed color per fill count, red (1 segment) -> green (all filled).
 lv_color_t BatteryTierColor(int filled_blocks)
 {
     switch (filled_blocks) {
@@ -84,80 +70,46 @@ lv_color_t BatteryTierColor(int filled_blocks)
 GuiManager::GuiManager(LGFX& lcd)
     : lcd_(lcd)
 {
-    // Centered on the panel so root_'s own local center coincides with
-    // the true screen center (kPanelSizePx/2, kPanelSizePx/2) — pivoting
-    // there keeps rotation looking correct without extra offset math.
+    // Centered on the panel so root_'s local center coincides with the
+    // true screen center — pivoting there keeps rotation correct without
+    // extra offset math.
     root_ = lv_obj_create(lv_screen_active());
     lv_obj_remove_style_all(root_);  // no border/padding/scrollbar — just a rotation anchor
     lv_obj_set_size(root_, kRootWidthPx, kRootHeightPx);
     lv_obj_set_pos(root_, (kPanelSizePx - kRootWidthPx) / 2, (kPanelSizePx - kRootHeightPx) / 2);
-    // root_ is a rotation pivot, not a visual mask (see the class doc) —
-    // by default LVGL still clips children to its box, which silently cut
-    // off the top of any primary text that wraps to 2 lines (kRootHeightPx
-    // is sized for kPrimaryFont's single-line height, see below; two lines
-    // is 2x that). Caught via calibration_mode.cpp's "Rotate\nand hold"
-    // (2026-09-01) — this flag makes root_ a plain rotation anchor with no
-    // clipping, matching what it's actually for.
+    // root_ is a rotation pivot, not a visual mask — by default LVGL
+    // clips children to its box, which would cut off wrapped 2-line text.
     lv_obj_add_flag(root_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_set_style_transform_pivot_x(root_, kRootWidthPx / 2, 0);
     lv_obj_set_style_transform_pivot_y(root_, kRootHeightPx / 2, 0);
 
-    // Bottom-aligned rather than centered (2026-08-30, was LV_ALIGN_CENTER)
-    // to make room for secondary_label_ above it — line_height 44 (this
-    // font) + 16 (secondary_label_'s) == kRootHeightPx (60) exactly, so
-    // the two stack flush with no gap or overlap and no need to grow
-    // root_.
+    // Bottom-aligned, not centered, to make room for secondary_label_
+    // above it — the two line_heights sum to exactly kRootHeightPx.
     label_ = lv_label_create(root_);
     lv_obj_set_style_text_font(label_, kPrimaryFont, 0);
     lv_obj_set_style_text_align(label_, LV_TEXT_ALIGN_CENTER, 0);
-    // -3px (2026-09-12, user's own low-battery "Low"/"Battery" screen
-    // feedback — "the two lines' text could sit a bit closer together") —
-    // the two labels' line_height
-    // boxes were already stacked flush with zero gap between them, but
-    // each font's line_height includes real leading/padding above and
-    // below its actual glyph ink, so "flush boxes" still reads as a
-    // visible gap. Nudging both labels a few px toward each other closes
-    // that leading-driven gap without touching kRootHeightPx or the
-    // fonts themselves. Applies to every face using both labels together
-    // (this pairing, not just the low-battery screen — e.g. BreathFace's
-    // phase name over its countdown), not scoped to low-battery alone.
+    // Nudged 3px toward secondary_label_ to close the visible gap each
+    // font's line-height leading leaves even when the boxes are flush.
     lv_obj_align(label_, LV_ALIGN_BOTTOM_MID, 0, -3);
-    // Set directly here, not left to SetWarmth(0.0f)'s side effect —
-    // AppController stopped calling SetWarmth (2026-08-25, brightness-only
-    // notifications), which silently left label_ on LVGL's default text
-    // color (near-invisible on the black background) since nothing else
-    // ever set it. SetWarmth() still exists and still works if the color
-    // channel comes back, but this baseline can't depend on it being
-    // called at all.
+    // Explicit, not left to SetWarmth(0.0f)'s side effect — AppController
+    // doesn't always call SetWarmth, and the default text color is
+    // near-invisible on the black background.
     lv_obj_set_style_text_color(label_, lv_color_white(), 0);
 
-    // See gui_manager.hpp's SetSecondaryText comment — small built-in
-    // font, not the custom primary one, specifically so its line_height
+    // Small built-in font, not the custom primary one, so its line_height
     // is known and small enough to fit above label_ within kRootHeightPx.
     secondary_label_ = lv_label_create(root_);
     lv_obj_set_style_text_font(secondary_label_, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_align(secondary_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(secondary_label_, LV_ALIGN_TOP_MID, 0, 3);  // see label_'s -3 offset above — same nudge, opposite direction
+    lv_obj_align(secondary_label_, LV_ALIGN_TOP_MID, 0, 3);  // same nudge as label_, opposite direction
     lv_obj_set_style_text_color(secondary_label_, lv_color_white(), 0);
-    // Explicit, same lesson as label_'s text-color init above: a fresh
-    // lv_label_t defaults to LVGL's own placeholder text ("Text"), not
-    // empty — left alone, that showed up as a real stray line on real
-    // hardware the very first time BreathFace's idle screen rendered
-    // (2026-08-30), because SetSecondaryText("")'s dirty-check compares
-    // against last_secondary_text_'s initial value, which is already ""
-    // — so that very first idle-screen call to clear it looked like a
-    // no-op and never actually reached lv_label_set_text() at all. Only
-    // cleared once some later *real* text ("Ready?") made the tracked
-    // value diverge from the actual on-screen "Text" for the first time.
+    // Explicit: a fresh lv_label_t defaults to LVGL's own placeholder
+    // text ("Text"), not empty.
     lv_label_set_text(secondary_label_, "");
 
-    // Dim background track (2026-09-09) — see kRingTrackOpa's comment in
-    // gui_manager.hpp. Created *before* ring_/ring_tick_ below so it
-    // z-orders underneath both (LVGL draws later-added siblings on top).
-    // Always a full circle (bg_angles never changes) at a fixed low
-    // opacity; SetAccentColor() gives it the same hue as the other two,
-    // SetRingVisible() shows/hides it together with them, and nothing
-    // else ever touches it.
+    // Dim background track: created before ring_/ring_tick_ below so it
+    // z-orders underneath both. Always a full circle at fixed low
+    // opacity; SetAccentColor() gives it the same hue as the other two.
     ring_track_ = lv_arc_create(lv_screen_active());
     lv_obj_remove_style_all(ring_track_);
     lv_obj_set_size(ring_track_, kRingRadiusPx * 2, kRingRadiusPx * 2);
@@ -172,18 +124,11 @@ GuiManager::GuiManager(LGFX& lcd)
     lv_obj_remove_flag(ring_track_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(ring_track_, LV_OBJ_FLAG_HIDDEN);
 
-    // Progress ring (2026-09-09, was a plain opacity-only circle border —
-    // see gui_manager.hpp's kRingRadiusPx/kRingWidthPx comment). lv_arc,
-    // not a plain lv_obj border, since the ring now needs a *partial*
-    // circle whose span changes every tick (SetRingProgress()) — same
-    // "no rotation needed" reasoning as before still applies (a fixed -90
-    // base rotation plus recomputed angles each call covers everything
-    // this needs, no per-tick object rotation against screen_angle_deg),
-    // so this stays a plain static object on lv_screen_active(), not a
-    // root_ child, same as before. LV_PART_MAIN is the only part drawn
-    // (styled below, color set later via SetAccentColor());
-    // LV_PART_INDICATOR/LV_PART_KNOB disabled the same way the battery
-    // view's wedge-prototype worked out — see that history for why.
+    // lv_arc, not a plain lv_obj border, since the ring needs a partial
+    // circle whose span changes every tick (SetRingProgress()). A fixed
+    // -90 base rotation plus recomputed angles each call covers
+    // everything needed, so this stays static on lv_screen_active(), not
+    // a root_ child. LV_PART_MAIN is the only part drawn.
     ring_ = lv_arc_create(lv_screen_active());
     lv_obj_remove_style_all(ring_);
     lv_obj_set_size(ring_, kRingRadiusPx * 2, kRingRadiusPx * 2);
@@ -199,15 +144,8 @@ GuiManager::GuiManager(LGFX& lcd)
     lv_obj_remove_flag(ring_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(ring_, LV_OBJ_FLAG_HIDDEN);
 
-    // Tick mark (2026-09-09; briefly a black "cut" then briefly fixed
-    // white, both 2026-09-11, both reverted the same day — see
-    // kRingTickRadiusPx/kRingTickWidthPx/kRingTickHalfSpanDeg's comment in
-    // gui_manager.hpp for the black-cut failure). Once arc_rounded=false
-    // (below) fixed the actual shape problem — confirmed on hardware,
-    // "the straight line looks right" — the color went back to following SetAccentColor()
-    // like ring_/ring_track_ (set there, not here; this initial white is
-    // just the pre-first-render default, same pattern as ring_/
-    // ring_track_ below).
+    // Color follows SetAccentColor() like ring_/ring_track_; this initial
+    // white is just the pre-first-render default.
     ring_tick_ = lv_arc_create(lv_screen_active());
     lv_obj_remove_style_all(ring_tick_);
     lv_obj_set_size(ring_tick_, kRingTickRadiusPx * 2, kRingTickRadiusPx * 2);
@@ -224,13 +162,10 @@ GuiManager::GuiManager(LGFX& lcd)
     lv_obj_remove_flag(ring_tick_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(ring_tick_, LV_OBJ_FLAG_HIDDEN);
 
-    // Battery icon (2026-09-11, replacing the full-panel band design — see
-    // the header's kBatteryBlockCount comment for the history). Plain
-    // children of lv_screen_active(), same non-rotating treatment as ring_
-    // above. Hidden by default; ShowBatteryView(true) reveals them.
-    // battery_segments_ start as "empty" dim bars — SetBatteryLevel() fills
-    // in the actual state before the view is ever shown to a user
-    // (AppController calls it every tick while showing_battery_ is true).
+    // Battery icon: plain children of lv_screen_active(), same
+    // non-rotating treatment as ring_. Hidden by default; ShowBatteryView(true)
+    // reveals them. battery_segments_ start as "empty" dim bars —
+    // SetBatteryLevel() fills in the actual state before this is shown.
 
     // Outline: border only, no fill — lv_obj_create's default bg would
     // otherwise show through as a solid gray rectangle behind the segments.
@@ -286,19 +221,10 @@ void GuiManager::SetPrimaryText(const char* text)
     last_text_[sizeof(last_text_) - 1] = '\0';
     lv_label_set_text(label_, text);
     ++update_count_;
-    // 2026-09-12: two rounds of trying to make label_ itself correctly
-    // reposition for a 2-line "Low\nBattery" string (re-align after the
-    // text change; then also forcing lv_obj_update_layout() first) both
-    // failed identical-looking on real hardware — the top line stayed
-    // clipped either way. Rather than keep guessing at label_'s
-    // auto-sizing/realign timing (called every tick for ordinary
-    // single-line digits, so not a place to keep bolting on speculative
-    // fixes anyway), the low-battery screen was changed to not need
-    // multi-line primary text at all — see AppController's low-battery
-    // branch, which now splits "Low"/"Battery" across secondary_label_
-    // and label_ instead, both already single-line and already proven to
-    // position correctly. This function is back to exactly what it was
-    // before that detour.
+    // Note: a real 2-line string here (e.g. "Low\nBattery") clips its top
+    // line on hardware — re-aligning or calling lv_obj_update_layout()
+    // after the text change doesn't fix it. Split multi-line content
+    // across secondary_label_ + label_ instead (both single-line).
 }
 
 void GuiManager::SetSecondaryText(const char* text)
@@ -348,30 +274,15 @@ void GuiManager::SetAccentColor(lv_color_t color)
     lv_obj_set_style_text_color(secondary_label_, color, 0);
     lv_obj_set_style_arc_color(ring_track_, color, LV_PART_MAIN);
     lv_obj_set_style_arc_color(ring_, color, LV_PART_MAIN);
-    // ring_tick_ back to following accent color (2026-09-11, was fixed
-    // white for one build — see its constructor comment) — confirmed on
-    // hardware that the white-vs-colored question was never the actual
-    // problem (arc_rounded was), so once the shape/position were right
-    // the user wanted it tied to the same hue as the ring, not standing
-    // out in white.
     lv_obj_set_style_arc_color(ring_tick_, color, LV_PART_MAIN);
 }
 
 void GuiManager::SetRingOrientation(float face_center_deg)
 {
     // -90 reproduces the original fixed behavior for face B
-    // (face_center_deg==0) — see the header comment. kRotationSign, not a
-    // bare +face_center_deg (2026-09-09, fixed after hardware feedback
-    // had it backwards — face A landed at B's 9 o'clock instead of the
-    // correct 3 o'clock): this needs the exact same compensating rotation
-    // SetRotationDeg() applies to root_ for this face's own centered
-    // angle, i.e. kRotationSign * face_center_deg, not the raw angle
-    // itself — the ring's fixed-per-face offset and root_'s continuous
-    // per-tick one are answering the same question ("what LVGL-space
-    // rotation keeps this face's content reading upright"), just recomputed
-    // once here instead of every tick. lv_arc_set_rotation() takes a plain
-    // int; no dirty-check here, this is only ever called once per face
-    // switch, not every tick.
+    // (face_center_deg==0). kRotationSign applies the same compensating
+    // rotation SetRotationDeg() uses for root_, just computed once here
+    // per face switch instead of every tick.
     const int32_t rotation_deg = static_cast<int32_t>(std::lround(-90.0f + kRotationSign * face_center_deg));
     lv_arc_set_rotation(ring_, rotation_deg);
     lv_arc_set_rotation(ring_tick_, rotation_deg);
@@ -385,14 +296,6 @@ void GuiManager::SetRingProgress(float elapsed_fraction, bool growing)
     if (frac > 1.0f) frac = 1.0f;
     const int32_t angle_deg10 = static_cast<int32_t>(frac * 3600.0f + 0.5f);  // tenths of a degree
 
-    // Dirty-check on angle (tenths of a degree) + mode together — same
-    // reasoning as SetRotationDeg's coarsening, though without that one's
-    // extra min-interval throttle: this only ever advances at whatever
-    // rate a phase's remaining_ms/elapsed_ms actually changes (at most
-    // once per real second's worth of countdown, given the digits
-    // displayed alongside it are themselves only 1Hz), nowhere near
-    // SetRotationDeg's up-to-120Hz sensor-driven case that throttle exists
-    // for.
     if (angle_deg10 == last_ring_angle_deg10_ && growing == last_ring_growing_) {
         return;
     }
@@ -406,22 +309,10 @@ void GuiManager::SetRingProgress(float elapsed_fraction, bool growing)
         lv_arc_set_bg_angles(ring_, boundary_deg, 360);
     }
 
-    // Tick: centered on the same boundary angle, kept in-bounds by
-    // *shifting* its span rather than clamping each edge independently
-    // (2026-09-11, fixed after hardware feedback: near elapsed_fraction≈0,
-    // a phase's tick is visible from the instant it starts running — see
-    // AppController::UpdateRing() — right where boundary_deg≈0 sits inside
-    // half the tick's own span of 0. A plain per-edge clamp there just
-    // dropped the tick_start<0 portion entirely, rendering only the
-    // boundary_deg..boundary_deg+halfSpan half — a tick reading roughly
-    // half as thick as normal for the first few seconds of every phase,
-    // "recovering" full thickness once boundary_deg grew past
-    // kRingTickHalfSpanDeg. Shifting the *whole* span by however much it
-    // overhung [0, 360] instead keeps its full 2*kRingTickHalfSpanDeg
-    // width at every boundary angle, at the cost of the tick's center
-    // drifting up to kRingTickHalfSpanDeg off the true boundary right at
-    // the two extremes — a couple degrees' position error reads far less
-    // wrong than a visibly thinner line.
+    // Tick: centered on the boundary angle, kept in [0, 360] by shifting
+    // its whole span rather than clamping each edge independently — a
+    // per-edge clamp would render only half the tick near boundary_deg≈0,
+    // reading as thinner than normal for the first few seconds of every phase.
     float tick_start = static_cast<float>(boundary_deg) - kRingTickHalfSpanDeg;
     float tick_end = static_cast<float>(boundary_deg) + kRingTickHalfSpanDeg;
     if (tick_start < 0.0f) {
@@ -557,20 +448,8 @@ void GuiManager::SetBatteryLevel(int filled_blocks)
 
 void GuiManager::ForceRedraw()
 {
-    // Re-run the panel's own init sequence (RST toggle, GC9A01A memory
-    // access control / etc. register writes) — added 2026-09-06 after
-    // the "just invalidate everything" version alone didn't fix a blank
-    // screen post-RunIdleSleep() even after switching to ESP-IDF's
-    // automatic light sleep (see gui_manager.hpp's comment). Confirmed
-    // safe to call again post-boot by reading LovyanGFX's own source
-    // (platforms/esp32/common.cpp): the SPI bus setup is guarded by
-    // `if (_spi_dev_handle[spi_host] == nullptr)`, so a second init()
-    // call skips spi_bus_initialize()/spi_bus_add_device() entirely and
-    // only redoes the panel-level register setup — not a resource leak
-    // or a double-init failure. Call this before restoring brightness
-    // (AppController::NotifyWokeFromIdleSleep()), since a full panel
-    // re-init is exactly the kind of thing that could glitch the
-    // backlight state along the way.
+    // Re-running init() a second time is safe — LovyanGFX guards the SPI
+    // bus setup, so this only redoes the panel-level register writes.
     lcd_.init();
     lv_obj_invalidate(lv_screen_active());
 }
