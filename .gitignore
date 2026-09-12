@@ -1,13 +1,10 @@
 .DS_Store
 **/.vscode
 
-# nested local-only repo, never tracked/pushed by the outer repo
-reference/private/
-
-# vendor material (Waveshare's own schematic/wiki) — kept locally for our
-# own reference, not ours to redistribute; see README.md for links to the
-# originals instead
-reference/vendor/
+# local-only reference material (private notes, vendor docs, pinout
+# tables) — kept on disk for our own use, not meant to be pushed;
+# reference/private/ also nests its own local-only .git repo
+reference/
 
 # ESP-IDF build artifacts
 firmware/build/

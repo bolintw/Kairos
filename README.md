@@ -30,24 +30,69 @@ filter and read back later (`git log --author="Claude Sonnet 5"`).
 <!-- ![Charging](docs/media/charge.gif) -->
 <!-- ![Battery-check gesture](docs/media/battery-check.gif) -->
 
-## Hardware
-
-- [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/esp32-s3-lcd-1.28.htm) — round 240x240 GC9A01A SPI display, QMI8658 6-axis IMU, ESP32-S3. ([Wiki](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28))
-- Non-touch variant; all interaction is gesture-driven (flip / tap), read via the onboard IMU.
-
-## How it works
+## Faces
 
 The device has no fixed "up" — the screen always faces you, and you rotate
-it in your hand like a dial. Four quadrants (A/B/C/D) each hold a different
-timer face — two Pomodoro variants, a stopwatch, and a guided 4-7-8
-breathing exercise — rotating past a hysteresis threshold switches which
-one is active. A single tap toggles start/pause on whichever face is
-showing. Screen brightness itself doubles as the notification channel — it
-fades during a focus session, snaps back on any interaction, and ramps up
-again as a phase is about to end — since there's no speaker or vibration
-motor.
+it in your hand like a dial. Four quadrants each hold a different timer:
 
-## Building
+| Face | Mode |
+|---|---|
+| A | Pomodoro, 25 min focus / 5 min break |
+| B | Pomodoro, 50 min focus / 10 min break |
+| C | Stopwatch (counts up, no target duration) |
+| D | Breathe — a guided 4-7-8 breathing exercise, four rounds that ramp up to the full pattern |
+
+Rotating past a hysteresis threshold switches which face is active and
+resets that face's progress. Screen brightness doubles as the notification
+channel — it fades during a focus session, snaps back on any interaction,
+and ramps up again as a phase is about to end — since there's no speaker or
+vibration motor.
+
+**Battery view**: not a fifth face — pick the device up and hold it tilted
+out of its normal resting plane for about half a second, and the screen
+swaps to a 5-segment battery gauge instead of whatever face was showing.
+Set it back down (or lay it flat again) and it returns immediately. The
+timer underneath keeps running the whole time.
+
+## Controls
+
+| Gesture | Action |
+|---|---|
+| Single tap | Start / pause whichever face is currently showing |
+| Flip | Rotate to a different face to switch what's being timed |
+| Double tap | Wakes the screen from idle sleep (a deliberate two-tap gesture, so an incidental bump won't wake it by accident) |
+| Hold BOOT (~3s) | Enters calibration mode, while the device is already running |
+
+## Hardware
+
+- [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/esp32-s3-lcd-1.28.htm) — round 240×240 GC9A01A SPI display, QMI8658 6-axis IMU, ESP32-S3, in one non-touch board.
+- One or two 800mAh 1S LiPo cells. Two wired in parallel (~1600mAh combined) is a drop-in upgrade — electrically it's still a single 1S pack to the charger and firmware.
+
+## Battery Life
+
+Measured current draw:
+
+| State | Current |
+|---|---|
+| Full brightness (paused / just interacted) | ~82mA |
+| Dimmed (running, immersion-faded) | ~70mA |
+| Idle sleep (light sleep, screen off) | ~800µA |
+
+The firmware also runs a two-stage low-battery safety net — a forced
+warning screen first, then automatic deep sleep to protect the cell from
+over-discharge if it's left unattended.
+
+Real-hardware endurance test on a single 800mAh cell, kept continuously
+active the entire time (never allowed to idle-sleep — the worst case for
+power draw): **10 hours 10 minutes** before the low-battery warning
+triggered. Day-to-day use, dominated by light sleep between interactions,
+runs considerably longer than this.
+
+## Assembly
+
+To be continued.
+
+## Building the Firmware
 
 Requires [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/get-started/index.html) v6.0 targeting `esp32s3`.
 
@@ -58,21 +103,6 @@ idf.py set-target esp32s3
 idf.py build
 idf.py -p <PORT> flash monitor
 ```
-
-## Status
-
-Actively developed, assembled in a 3D-printed enclosure, and running
-day-to-day on battery. Idle power management is done: real light sleep
-(~0.8-0.9mA, down from ~70-90mA active) woken by the IMU's native
-Wake-on-Motion mode rather than software polling, with a double-tap
-gesture to confirm an intentional wake. Battery voltage is sensed via ADC
-and backs a two-stage low-battery safety net — a forced warning screen
-first, then a genuine deep-sleep/reboot below a critical threshold, with
-hysteresis tuned against a real charging-induced voltage jump. Current
-focus is retuning tap-gesture sensitivity now that the enclosure has
-changed how vibration reaches the IMU. See the milestone list and design
-notes inline in the source (`firmware/main/*.hpp` design comments carry a
-lot of the "why", not just the "what").
 
 ## License
 
