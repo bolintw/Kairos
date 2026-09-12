@@ -76,11 +76,20 @@ void DelayWithDisplay(uint32_t total_ms)
 // raw output is stored directly as face_a_offset_deg below (unchanged by
 // this file), and AttitudeEstimator's new formula was specifically
 // derived to still consume an offset computed this old way correctly, so
-// this stays as-is. The one caller that needs the *new* convention
-// (DelayWithDisplayAndRotation's live rotation preview, so it pairs
-// correctly with GuiManager's now-flipped kRotationSign) negates this
-// function's result at its own call site instead of this function
-// changing — see there.
+// this stays as-is. Every *live rotation preview* caller (so text stays
+// upright, paired correctly with GuiManager's flipped kRotationSign)
+// needs the *new* convention instead, and negates this function's result
+// at its own call site rather than this function changing — see
+// DelayWithDisplayAndRotation and CollectAccelBias below.
+//
+// 2026-09-12 bug: CollectAccelBias's two gui.SetRotationDeg() calls were
+// missed when the sign flip landed (2026-09-11) — only
+// DelayWithDisplayAndRotation's call site was updated at the time. Since
+// negating a rotation angle is a no-op at 0*/180* but fully reverses
+// direction at 90*/270*, this made the on-screen text spin the wrong way
+// specifically while settling into two of the four bias points (matches
+// the "兩面方向不對" hardware report), even though the countdown phase
+// right before it looked correct.
 float RawAccelAngleDeg(float ax, float ay)
 {
     return std::atan2(-ax, -ay) * kRadToDeg;
@@ -181,7 +190,7 @@ BiasCollectionResult CollectAccelBias(Qmi8658& imu, GuiManager& gui)
         Qmi8658::Sample sample;
         const bool got_sample = imu.Read(sample);
         if (got_sample) {
-            gui.SetRotationDeg(RawAccelAngleDeg(sample.accel_g[0], sample.accel_g[1]));
+            gui.SetRotationDeg(-RawAccelAngleDeg(sample.accel_g[0], sample.accel_g[1]));
         }
         lv_timer_handler();
         vTaskDelay(pdMS_TO_TICKS(kSamplingPeriodMs));
@@ -233,7 +242,7 @@ BiasCollectionResult CollectAccelBias(Qmi8658& imu, GuiManager& gui)
                 gyro_sum[2] += point_sample.gyro_dps[2];
                 ++point_samples;
                 ++gyro_sample_count;
-                gui.SetRotationDeg(RawAccelAngleDeg(point_sample.accel_g[0], point_sample.accel_g[1]));
+                gui.SetRotationDeg(-RawAccelAngleDeg(point_sample.accel_g[0], point_sample.accel_g[1]));
             }
             lv_timer_handler();
             vTaskDelay(pdMS_TO_TICKS(kSamplingPeriodMs));
