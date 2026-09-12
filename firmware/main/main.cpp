@@ -3,7 +3,9 @@
 #include <cstdio>
 
 #include "driver/gpio.h"
+#include "esp_attr.h"
 #include "esp_pm.h"
+#include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -56,7 +58,53 @@ constexpr int64_t kSensorUpdatePeriodUs = 1000000 / 120;  // ~120Hz
 // battery doesn't change meaningfully within a second, and
 // BatteryMonitor::ReadVoltage() already blocks for kNumSamples (32) raw
 // ADC reads per call, no benefit to calling it any more often than this.
-constexpr int64_t kBatteryReadPeriodUs = 1000000;  // 1Hz
+// 1s -> 10s (2026-09-12, user's own observation: the device now runs
+// 5+ hours per charge, so 1Hz was needlessly frequent). Not really a
+// power lever either way — the ADC read itself (32 samples, a few ms)
+// costs very little — this is about matching the poll rate to how slowly
+// voltage actually moves (minutes-scale drift, per this project's own
+// real discharge-curve data) without making the on-screen Bat readout or
+// the low-battery threshold detection feel noticeably laggy. Landed
+// short of 30-60s for that reason.
+constexpr int64_t kBatteryReadPeriodUs = 10 * 1000000;  // 0.1Hz
+
+// Stage 2 of the low-battery safety net (2026-09-12) — see
+// app_controller.hpp design note 11 for stage 1 (the warning screen,
+// which handles down to kLowBatteryEnterV). Below this second, lower
+// threshold, refuse to keep running at all: forced deep sleep instead of
+// the normal light-sleep+WoM loop — see the idle-sleep block below and
+// kInCriticalBatterySleep's comment for the full mechanism. Enter is
+// AppController::kCriticalBatteryEnterV (3.0V, per the user's own earlier
+// research — gravity_timer_project_plan.md's M9 notes, 1S LiPo discharge
+// floor ~3.0V), NOT a second copy of the literal here — AppController
+// needs the exact same number for design note 11's "countdown can't be
+// reset once critical" rule, and the two must never drift apart from each
+// other, so this file reads that one instead of keeping its own.
+// 3.2f -> 3.8f (2026-09-12, before this was ever flashed for a real
+// deep-discharge test): the user's own observation from watching this
+// battery charge — terminal voltage jumps up a real, visible step the
+// *instant* charging current starts flowing, well before any meaningful
+// capacity has actually gone back in. That's internal resistance, not
+// state of charge: while current I flows into (or out of) a cell, the
+// terminal voltage you can measure is the true open-circuit voltage
+// plus/minus I*R_internal, not the open-circuit voltage itself — and a
+// cell already suspected of being degraded (this project's own "1000mAh"
+// battery turned out closer to ~415mAh real capacity, a likely sign of
+// exactly this kind of degradation) can have a notably higher internal
+// resistance than a healthy one, making the jump bigger, not smaller,
+// right when it matters most. A narrow 3.0/3.2V gap risks reading that
+// transient IR bump alone as "recovered" and resuming full active
+// operation — screen on, sensor loop running, ~70-90mA — while the
+// battery's *real* stored energy has barely moved, right back toward the
+// same critical voltage under that load. 3.8V is far enough above 3.0V
+// that no plausible IR jump alone gets there; reaching it means real
+// charge has actually gone back in.
+constexpr float kCriticalBatteryExitV = 3.8f;
+// Deep sleep current is tiny (~8uA) next to even a brief active-boot
+// check, so this can afford to be fairly frequent without much power
+// cost — 30s balances noticing a just-started charge reasonably promptly
+// against not re-booting excessively often. Starting guess, not tuned.
+constexpr uint64_t kCriticalBatteryCheckPeriodUs = 30ULL * 1000 * 1000;
 
 // Flip to false to hide the debug overlay entirely (angle/taps/is_moving
 // label at the top) without deleting the code — flip back on when
@@ -398,6 +446,70 @@ void RunWomEdgeTest(Qmi8658& imu)
 
 extern "C" void app_main(void)
 {
+    // GPIO0 (BOOT) as a normal input once past the ROM bootloader's
+    // strapping check — see calibration_mode.hpp for why this is only
+    // polled here, not checked at reset. Moved to the very top (2026-09-12,
+    // was further down, after NVS/calibration init) so the critical-battery
+    // escape hatch just below can share this one config call instead of
+    // needing its own.
+    gpio_config_t boot_btn_cfg = {};
+    boot_btn_cfg.pin_bit_mask = 1ULL << GPIO_NUM_0;
+    boot_btn_cfg.mode = GPIO_MODE_INPUT;
+    boot_btn_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    gpio_config(&boot_btn_cfg);
+
+    // Stage 2's periodic recheck (2026-09-12) — see kCriticalBatteryEnterV's
+    // comment for the policy and the idle-sleep block below for where this
+    // flag gets set true. Checked as the very first real thing in
+    // app_main(), before any of the heavier LCD/LVGL/IMU init below: deep
+    // sleep, unlike every other sleep path in this project, is a full
+    // reboot, not a resume — app_main() runs again from scratch, and RTC
+    // memory (this flag's storage class) is the only thing that survives
+    // it. That's *why* this flag exists: it's how a fresh boot tells "was
+    // I woken specifically to re-check a critical battery voltage, or is
+    // this a normal boot" apart, before committing to either path. Kept
+    // deliberately minimal when it IS a recheck — just enough to read the
+    // ADC and decide whether to go straight back to sleep — so each
+    // periodic wake-and-recheck cycle costs as little active time (and
+    // therefore power) as possible; the full LCD/LVGL/IMU/etc. init below
+    // never runs at all for a cycle that goes back to sleep.
+    static RTC_DATA_ATTR bool in_critical_battery_sleep = false;
+    if (in_critical_battery_sleep && esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+        // Escape hatch: hold BOOT through a wake to force a real boot
+        // regardless of voltage. Exists because a bug in this still-new
+        // mechanism could otherwise strand the device in an
+        // indefinite sleep-reboot-sleep loop with no way back in short of
+        // reflashing (which itself needs a real boot to reach the
+        // download-mode entry point) — same "don't want a firmware bug to
+        // look like a bricked device" reasoning as design note 9's
+        // double-tap wake, one level more serious here since deep sleep
+        // exits this whole function rather than just a loop inside it.
+        const bool boot_held = gpio_get_level(GPIO_NUM_0) == 0;
+        if (!boot_held) {
+            BatteryMonitor critical_battery_monitor;
+            const float v = critical_battery_monitor.ReadVoltage();
+            // Always-on, not gated behind kDebugEnabled (debug_config.hpp)
+            // — this is a new, higher-stakes mechanism (a real reboot
+            // cycle) worth being able to see regardless of the general
+            // debug flag state, same reasoning qmi8658.hpp gives for
+            // always printing real errors. Plain %.2f, not the LVGL
+            // fixed-point workaround main.cpp's on-screen label needs
+            // (LVGL's own lightweight sprintf doesn't support %f) — this
+            // goes to the serial console's real printf, which already
+            // uses %f elsewhere in this file (see the ATT log above).
+            printf("CRITICAL_BATTERY_RECHECK,v=%.2fV\n", v);
+            if (v < kCriticalBatteryExitV) {
+                esp_sleep_enable_timer_wakeup(kCriticalBatteryCheckPeriodUs);
+                esp_deep_sleep_start();  // never returns
+            }
+            printf("CRITICAL_BATTERY_RECOVERED — resuming normal boot\n");
+            // else: voltage recovered — fall through to a real boot below.
+        } else {
+            printf("CRITICAL_BATTERY_ESCAPE_HATCH — BOOT held, forcing a real boot\n");
+        }
+        in_critical_battery_sleep = false;
+    }
+
     printf("Kairos gravity timer — hello from C++\n");
 
     esp_err_t nvs_err = nvs_flash_init();
@@ -414,15 +526,6 @@ extern "C" void app_main(void)
         printf("No saved calibration — using uncalibrated defaults until "
                "RunCalibrationMode() is run once (hold BOOT ~3s)\n");
     }
-
-    // GPIO0 (BOOT) as a normal input once past the ROM bootloader's
-    // strapping check — see calibration_mode.hpp for why this is only
-    // polled here, not checked at reset.
-    gpio_config_t boot_btn_cfg = {};
-    boot_btn_cfg.pin_bit_mask = 1ULL << GPIO_NUM_0;
-    boot_btn_cfg.mode = GPIO_MODE_INPUT;
-    boot_btn_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
-    gpio_config(&boot_btn_cfg);
 
     lcd.init();
     lcd.setBrightness(255);  // full bright at boot; AppController takes over from here
@@ -722,6 +825,27 @@ extern "C" void app_main(void)
                 app_controller.Update(attitude, sensor_dt_ms);
 
                 if (app_controller.ShouldEnterIdleSleep()) {
+                    // Stage 2 of the low-battery safety net (2026-09-12) —
+                    // see kCriticalBatteryEnterV's comment and
+                    // in_critical_battery_sleep's comment at the top of
+                    // this function for the full mechanism. Checked first,
+                    // ahead of the normal light-sleep+WoM path below: once
+                    // voltage is this low, don't bother with WoM/tap at
+                    // all, go straight to deep sleep and don't come back
+                    // for real (screen included) until a periodic
+                    // voltage recheck sees it recovered — a world away
+                    // from the "wake on any bump" friction this file's
+                    // other sleep path is tuned for. last_battery_voltage_v
+                    // may be a few seconds stale (kBatteryReadPeriodUs is
+                    // 1Hz) but that's immaterial next to how slowly
+                    // voltage actually moves.
+                    if (last_battery_voltage_v < AppController::kCriticalBatteryEnterV) {
+                        printf("CRITICAL_BATTERY_ENTER,v=%.2fV — deep sleep starting\n", last_battery_voltage_v);
+                        in_critical_battery_sleep = true;
+                        esp_sleep_enable_timer_wakeup(kCriticalBatteryCheckPeriodUs);
+                        esp_deep_sleep_start();  // never returns
+                    }
+
                     // tick_timer fires every kLvglTickPeriodMs (5ms) with
                     // skip_unhandled_events=false, which floors every
                     // idle gap FreeRTOS sees at ~5ms — below
@@ -790,7 +914,26 @@ extern "C" void app_main(void)
                             (void)imu.PollWomEvent();
                             vTaskDelay(pdMS_TO_TICKS(20));
                         }
-                        RunIdleSleep(imu);
+                        const IdleSleepWakeReason wake_reason =
+                            RunIdleSleep(imu, battery_monitor, AppController::kCriticalBatteryEnterV);
+                        if (wake_reason == IdleSleepWakeReason::kCriticalBattery) {
+                            // Voltage crossed critical while this device
+                            // was already asleep with nobody around to
+                            // wake it (2026-09-12 — see
+                            // IdleSleepWakeReason's comment in
+                            // sleep_mode.hpp) — skip the WoM-confirm dance
+                            // entirely and go straight to deep sleep, same
+                            // as the "just noticed while awake" path
+                            // below. No need to ExitWakeOnMotion()/
+                            // ConfigureTap() first: deep sleep reboots on
+                            // the way back regardless, so whatever state
+                            // the IMU is left in gets reinitialized from
+                            // scratch next real boot anyway.
+                            printf("CRITICAL_BATTERY_ENTER (from light sleep) — deep sleep starting\n");
+                            in_critical_battery_sleep = true;
+                            esp_sleep_enable_timer_wakeup(kCriticalBatteryCheckPeriodUs);
+                            esp_deep_sleep_start();  // never returns
+                        }
                         const int64_t wom_confirmed_us = esp_timer_get_time();
                         imu.ExitWakeOnMotion();
                         // ExitWakeOnMotion() deliberately leaves CTRL7

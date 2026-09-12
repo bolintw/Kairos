@@ -1,6 +1,20 @@
 #pragma once
 
+#include "battery_monitor.hpp"
 #include "qmi8658.hpp"
+
+// Which of the two things RunIdleSleep() can return for made it stop
+// sleeping — see that function's comment. kCriticalBattery added
+// 2026-09-12 alongside the low-battery safety net's stage 2
+// (main.cpp's kCriticalBatteryEnterV/AppController::kCriticalBatteryEnterV):
+// this loop can now sit here for a long time with nobody ever waking it,
+// during which battery voltage keeps draining at light sleep's own
+// ~0.8-0.9mA — without checking for that here, a device already asleep
+// when it crossed the critical threshold would just never notice and
+// stay in light sleep indefinitely, defeating stage 2 entirely for
+// exactly the case (nobody touching the device) it exists to protect
+// against.
+enum class IdleSleepWakeReason { kMotion, kCriticalBattery };
 
 // Blocking idle-power-saving routine (M9) — called once
 // AppController::ShouldEnterIdleSleep() goes true, i.e. the screen has
@@ -8,7 +22,12 @@
 // app_controller.hpp design note 9). Repeatedly sleeps (real light sleep,
 // woken by either a Wake-on-Motion event on IMU_INT2 or a ~1s backstop
 // timer — see the .cpp) and polls for one in between, returning as soon
-// as one is detected.
+// as one is detected — or, checked far less often on the same backstop
+// timer (see the .cpp's kBatteryCheckIntervalUs), as soon as
+// battery_monitor reads below critical_battery_v. The caller (main.cpp)
+// is expected to check the return value and go straight to deep sleep on
+// kCriticalBattery, skipping the normal WoM-confirm dance entirely — see
+// its own idle-sleep block.
 //
 // Wake-on-Motion, not tap (2026-09-06, wom-wake-mode branch — was
 // tap-engine-based on main): the caller must have already switched the
@@ -56,4 +75,4 @@
 // AppController calls this, and nothing here should light it back up
 // (that's AppController::NotifyWokeFromIdleSleep()'s job, called once
 // this returns).
-void RunIdleSleep(Qmi8658& imu);
+IdleSleepWakeReason RunIdleSleep(Qmi8658& imu, BatteryMonitor& battery_monitor, float critical_battery_v);

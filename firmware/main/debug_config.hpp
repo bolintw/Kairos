@@ -20,4 +20,10 @@
 // "Flag layout note" for that still-applicable reasoning — this shared
 // flag only narrows that note's scope for the sleep/wake/tap subset,
 // doesn't override it).
-constexpr bool kDebugEnabled = false;
+// true (2026-09-12) — back on so the on-screen overlay shows live voltage
+// during the stage-2 critical-battery deep-discharge test, which
+// deliberately runs with no USB/serial connection (that's the whole
+// point of the test), so the serial logs this same flag also gates are
+// moot for it either way — printing to a UART nothing's listening on is
+// harmless, just unread.
+constexpr bool kDebugEnabled = true;

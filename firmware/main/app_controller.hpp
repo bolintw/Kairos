@@ -413,9 +413,12 @@
 //     what you're doing" event a critically low battery is.
 //
 // 11. Low-battery warning screen (2026-09-11) — stage 1 of the plan-doc's
-//     two-stage low-battery safety net (stage 2, forced deep sleep below
-//     a lower threshold with no tap/wake accepted, still isn't built;
-//     this is deliberately scoped to stage 1 alone). Voltage-driven, not
+//     two-stage low-battery safety net. Stage 2 (forced deep sleep below
+//     a lower threshold, no tap/wake accepted — 2026-09-12) lives entirely
+//     in main.cpp, not here: it's a full reboot-based mechanism
+//     (kCriticalBatteryEnterV/in_critical_battery_sleep, see their own
+//     comments there) with nothing for AppController to own, unlike this
+//     stage which is all in-process state. Voltage-driven, not
 //     gesture-driven like design note 10's battery-check view: evaluated
 //     every tick against battery_voltage_v_ with its own hysteresis pair
 //     (kLowBatteryEnterV/kLowBatteryExitV — same enter-high/exit-lower
@@ -425,19 +428,37 @@
 //     over whatever face/phase was showing — deliberately NOT exempt from
 //     idle-sleep the way showing_battery_ is: staying fully bright
 //     indefinitely while already low on charge works against the exact
-//     thing this screen exists to protect ("一直亮著電量好像也沒幫助" —
-//     the user's own framing). Runs its own copy of design note 5's
+//     thing this screen exists to protect ("staying lit the whole time
+//     doesn't actually help the battery" — the user's own framing). Runs
+//     its own copy of design note 5's
 //     bright-hold/fade/dim-hold/cut-to-off timeline
 //     (kIdlePreDimHoldMs/kIdleFadeToDimMs/kIdleDimHoldMs/
 //     kIdleSleepThresholdMs, reused as-is) against a separate
 //     low_battery_idle_elapsed_ms_ counter rather than paused_elapsed_ms_,
 //     since there's no TimerFace::Status to derive is_running/just_paused
-//     from here — attitude.is_moving alone resets it (mirrors design note
-//     5's "spinning it in their hand" case), and OnTap() has its own
+//     from here — attitude.is_moving resets it (mirrors design note 5's
+//     "spinning it in their hand" case), and OnTap() has its own
 //     early-return branch (matching showing_battery_'s — see OnTap())
 //     that resets it and swallows the tap rather than forwarding to
 //     current_->onTap(), same "don't let incidental interaction reach the
 //     hidden face" reasoning as design note 9's wake-tap handling.
+//
+//     Countdown lock below kCriticalBatteryEnterV (2026-09-12, user's own
+//     safety concern): once voltage is this low, *neither* of those two
+//     resets is allowed to fire anymore — Update() and OnTap() both check
+//     battery_voltage_v_ < kCriticalBatteryEnterV first and skip their
+//     reset when true, so low_battery_idle_elapsed_ms_ counts straight
+//     down to kIdleSleepThresholdMs no matter how much the device is
+//     picked up, shaken, or tapped. Without this, someone (deliberately
+//     or not) keeping the device in continuous motion could hold it in
+//     active operation indefinitely below the voltage this project's own
+//     research already flagged as the edge of real, permanent LiPo
+//     damage — the exact outcome stage 2's "no tap/wake accepted" design
+//     already exists to prevent, just from the other end (this closes the
+//     approach to it, not just the exit). Above kCriticalBatteryEnterV
+//     but still below kLowBatteryEnterV, interaction resetting the timer
+//     stays exactly as before — there's real margin there, and letting
+//     the warning stay bright while being handled is still useful.
 //     Unlike design note 10's battery-check view, a running timer is NOT
 //     just left ticking silently underneath — UpdateLowBatteryHysteresis()
 //     force-pauses it (a synthetic onTap() the instant showing_low_battery_
@@ -471,6 +492,21 @@
 class AppController {
 public:
     enum class Face { kA, kB, kC, kD };
+
+    // Stage 2 of the low-battery safety net's entry threshold — the
+    // actual deep-sleep trigger lives in main.cpp (kCriticalBatteryExitV
+    // sits there too, unneeded here — AppController never sees the exit
+    // side, that only matters in the special minimal-boot recheck path,
+    // which doesn't construct an AppController at all), but this class
+    // needs the SAME number for design note 11's "countdown can't be
+    // reset once critical" rule below, and the two must never drift apart
+    // from each other — a mismatch here would mean either the countdown
+    // locks before main.cpp is actually ready to act on it, or main.cpp
+    // deep-sleeps while the countdown could still have been reset out
+    // from under it. Public and named identically to main.cpp's own
+    // (removed) copy so that file references this one instead of keeping
+    // a second literal in sync by hand.
+    static constexpr float kCriticalBatteryEnterV = 3.0f;
 
     explicit AppController(GuiManager& gui_manager);
 

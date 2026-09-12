@@ -274,7 +274,11 @@ void AppController::Update(const AttitudeEstimator::Output& attitude, uint32_t d
         if (current_) {
             current_->onTick(dt_ms);
         }
-        if (attitude.is_moving) {
+        // See design note 11's "countdown lock" note — once voltage is
+        // critical, motion no longer resets this countdown at all, so
+        // continuous shaking/handling can't hold the device awake
+        // indefinitely below the real-damage edge.
+        if (attitude.is_moving && battery_voltage_v_ >= kCriticalBatteryEnterV) {
             low_battery_idle_elapsed_ms_ = 0;
         } else {
             low_battery_idle_elapsed_ms_ += dt_ms;
@@ -547,8 +551,13 @@ void AppController::OnTap()
         // Update()) but is swallowed here rather than forwarded to
         // current_->onTap(), same reasoning as design note 9's wake-tap
         // handling: don't let an incidental tap on the warning screen
-        // silently start/pause whatever's hidden underneath.
-        low_battery_idle_elapsed_ms_ = 0;
+        // silently start/pause whatever's hidden underneath. Below
+        // kCriticalBatteryEnterV the reset itself is also withheld — see
+        // design note 11's "countdown lock" note — so a tap can't hold
+        // the countdown back any more than motion can.
+        if (battery_voltage_v_ >= kCriticalBatteryEnterV) {
+            low_battery_idle_elapsed_ms_ = 0;
+        }
         return;
     }
     if (tap_mute_remaining_ms_ > 0) {

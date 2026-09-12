@@ -4,6 +4,7 @@
 
 #include "driver/gpio.h"
 #include "esp_sleep.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -20,6 +21,16 @@ constexpr gpio_num_t kImuInt2Gpio = GPIO_NUM_48;
 // how long a single esp_light_sleep_start() call is allowed to sleep
 // before waking on its own regardless of GPIO activity.
 constexpr uint32_t kSleepBackstopMs = 1000;
+
+// How often this loop checks battery voltage while otherwise just
+// waiting for WoM (2026-09-12 — see IdleSleepWakeReason's comment in
+// sleep_mode.hpp for why it checks at all). Same 30s figure as main.cpp's
+// kCriticalBatteryCheckPeriodUs for consistency, not because the two are
+// required to match — this one governs "how soon does an already-sleeping
+// device notice it crossed the critical threshold", that one governs "how
+// often does an already-critical device re-check for recovery"; different
+// questions that happen to want a similar answer.
+constexpr int64_t kBatteryCheckIntervalUs = 30LL * 1000 * 1000;
 
 // Gates the SLEEP,err=...,cause=...,int2=... line below — tied to the
 // shared kDebugEnabled (debug_config.hpp, 2026-09-12) alongside
@@ -75,7 +86,7 @@ constexpr bool kSleepDebugLogEnabled = kDebugEnabled;
 // idle-sleep block for the IMU-side half of this change; a tap's INT2
 // pulse is brief, a WoM event's is a held level, and only the latter is
 // the shape light sleep's GPIO wakeup can reliably catch.
-void RunIdleSleep(Qmi8658& imu)
+IdleSleepWakeReason RunIdleSleep(Qmi8658& imu, BatteryMonitor& battery_monitor, float critical_battery_v)
 {
     gpio_config_t cfg = {};
     cfg.pin_bit_mask = 1ULL << kImuInt2Gpio;
@@ -91,6 +102,9 @@ void RunIdleSleep(Qmi8658& imu)
     gpio_wakeup_enable(kImuInt2Gpio, GPIO_INTR_HIGH_LEVEL);
     esp_sleep_enable_gpio_wakeup();
     esp_sleep_enable_timer_wakeup(kSleepBackstopMs * 1000);
+
+    IdleSleepWakeReason wake_reason = IdleSleepWakeReason::kMotion;
+    int64_t next_battery_check_us = esp_timer_get_time() + kBatteryCheckIntervalUs;
 
     while (true) {
         const esp_err_t err = esp_light_sleep_start();
@@ -110,7 +124,22 @@ void RunIdleSleep(Qmi8658& imu)
         // this), so there's no gyro-magnitude check to make here anymore,
         // same as the tap-based version this replaced.
         if (imu.PollWomEvent()) {
+            wake_reason = IdleSleepWakeReason::kMotion;
             break;
+        }
+
+        // Battery check (2026-09-12) — see IdleSleepWakeReason's comment
+        // in sleep_mode.hpp. Piggybacks on this same ~1s backstop wake
+        // rather than adding a separate sleep/wake cycle of its own, just
+        // gated to only actually read the ADC every kBatteryCheckIntervalUs
+        // — no reason to spend that on every single 1s backstop.
+        const int64_t now_us = esp_timer_get_time();
+        if (now_us >= next_battery_check_us) {
+            next_battery_check_us = now_us + kBatteryCheckIntervalUs;
+            if (battery_monitor.ReadVoltage() < critical_battery_v) {
+                wake_reason = IdleSleepWakeReason::kCriticalBattery;
+                break;
+            }
         }
 
         // err != ESP_OK (most likely ESP_ERR_SLEEP_REJECT, see the class
@@ -128,4 +157,5 @@ void RunIdleSleep(Qmi8658& imu)
     gpio_wakeup_disable(kImuInt2Gpio);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+    return wake_reason;
 }
