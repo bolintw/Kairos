@@ -14,6 +14,7 @@
 #include "attitude_estimator.hpp"
 #include "battery_monitor.hpp"
 #include "calibration_mode.hpp"
+#include "debug_config.hpp"
 #include "sleep_mode.hpp"
 #include "gui_manager.hpp"
 #include "i2c_scan.hpp"
@@ -59,7 +60,10 @@ constexpr int64_t kBatteryReadPeriodUs = 1000000;  // 1Hz
 
 // Flip to false to hide the debug overlay entirely (angle/taps/is_moving
 // label at the top) without deleting the code — flip back on when
-// debugging attitude/tap behavior again.
+// debugging attitude/tap behavior again. Tied to the shared kDebugEnabled
+// (debug_config.hpp, 2026-09-12) rather than its own independent literal
+// now — see that header's comment for why this one specifically groups
+// with the sleep/wake/tap serial logs.
 //
 // Briefly tested false 2026-09-06 to check whether this label (the one
 // piece of on-screen text that bypasses GuiManager's dirty-check —
@@ -69,7 +73,7 @@ constexpr int64_t kBatteryReadPeriodUs = 1000000;  // 1Hz
 // label off, same ~11-chunks-per-tick ratio either way. Real cause turned
 // out to be root_'s rotation redraw (see GuiManager::SetRotationDeg's
 // comment) — fixed there instead, so this stays on.
-constexpr bool kDebugOverlayEnabled = true;
+constexpr bool kDebugOverlayEnabled = kDebugEnabled;
 
 // Temporary diagnostic: one live "ATT," CSV line per sensor tick with
 // AttitudeEstimator's gyro-only angle, accel-only angle, fused angle, and
@@ -193,9 +197,10 @@ constexpr int kWomConfirmPollMs = 20;
 // measured ~13.45ms on real hardware, small enough to rule out as the
 // cause of the enclosure wake-reliability issue (see
 // kWomConfirmWindowMs's comment for what the actual cause turned out to
-// be). Left enabled: cheap, and worth keeping visible if this ever
-// changes on different hardware.
-constexpr bool kWomConfirmLatencyLogEnabled = true;
+// be). Tied to the shared kDebugEnabled (debug_config.hpp, 2026-09-12)
+// now that the immediate mystery it was added for is resolved — cheap
+// enough to leave wired up for next time, just not printing by default.
+constexpr bool kWomConfirmLatencyLogEnabled = kDebugEnabled;
 
 static LGFX lcd;
 // Two buffers now (2026-09-06, was one) — see lvgl_flush_cb()'s
@@ -597,19 +602,24 @@ extern "C" void app_main(void)
     // outer while(true) actually run in the last second"; the four *_us
     // accumulators say which section it went into.
     //
-    // Flag layout note (2026-09-07) — this file now has four independent
-    // debug toggles (this one, kDebugOverlayEnabled, kAttitudeDebugLogEnabled,
-    // kRunWomEdgeTestOnBoot) plus a few more scattered in qmi8658.hpp/
-    // sleep_mode.cpp (see their own kQmi8658DebugLogEnabled/
-    // kSleepDebugLogEnabled). Deliberately NOT merged into one shared
-    // flag: kDebugOverlayEnabled is on-screen UI (harmless to always
-    // leave on, no serial cost), while the rest are serial printf streams
-    // that actively compete for the same UART — turning all of them on
-    // together interleaves LOOP/ATT/tap/WoM/sleep lines into one stream
-    // and defeats whichever one you actually meant to read (e.g. a clean
-    // ATT-only capture for graphing, this file's kAttitudeDebugLogEnabled
-    // right above, is the reason this one is off right now). Each stays
-    // its own bool, flip only the ones relevant to what's being debugged.
+    // Flag layout note (2026-09-07, revised 2026-09-12) — this file has
+    // several independent debug toggles: this one, kAttitudeDebugLogEnabled,
+    // kRunWomEdgeTestOnBoot, plus the kDebugEnabled-linked group
+    // (kDebugOverlayEnabled/kWomConfirmLatencyLogEnabled here and
+    // qmi8658.hpp's kQmi8658DebugLogEnabled/sleep_mode.cpp's
+    // kSleepDebugLogEnabled — see debug_config.hpp). That group merges on
+    // purpose now: sleep/wake/tap logs plus the on-screen overlay all
+    // narrate the same story, so seeing them together (or not at all) is
+    // the useful grouping, and the overlay being on-screen UI rather than
+    // serial output means it was never part of the UART-contention concern
+    // below anyway. This one and kAttitudeDebugLogEnabled stay separate
+    // from that group and from each other: both are serial printf streams
+    // that actively compete for the same UART — turning them on together
+    // interleaves LOOP/ATT/tap/WoM/sleep lines into one stream and defeats
+    // whichever one you actually meant to read (e.g. a clean ATT-only
+    // capture for graphing, this file's kAttitudeDebugLogEnabled right
+    // above, is the reason this one is off right now). Flip only the ones
+    // relevant to what's being debugged.
     constexpr bool kLoopTimingLogEnabled = false;
     uint32_t loop_count = 0;
     int64_t tap_poll_accum_us = 0;

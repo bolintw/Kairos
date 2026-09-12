@@ -7,6 +7,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "debug_config.hpp"
+
 namespace {
 
 constexpr gpio_num_t kImuInt2Gpio = GPIO_NUM_48;
@@ -19,10 +21,12 @@ constexpr gpio_num_t kImuInt2Gpio = GPIO_NUM_48;
 // before waking on its own regardless of GPIO activity.
 constexpr uint32_t kSleepBackstopMs = 1000;
 
-// Gates the SLEEP,err=...,cause=...,int2=... line below — see main.cpp's
-// kLoopTimingLogEnabled flag-layout note for why this is its own flag
-// rather than shared with anything else.
-constexpr bool kSleepDebugLogEnabled = true;
+// Gates the SLEEP,err=...,cause=...,int2=... line below — tied to the
+// shared kDebugEnabled (debug_config.hpp, 2026-09-12) alongside
+// qmi8658.hpp's tap/WoM logs and main.cpp's overlay/WoM-latency log; see
+// that header's comment for why this group merges while
+// kAttitudeDebugLogEnabled/kLoopTimingLogEnabled (main.cpp) stay separate.
+constexpr bool kSleepDebugLogEnabled = kDebugEnabled;
 
 }  // namespace
 

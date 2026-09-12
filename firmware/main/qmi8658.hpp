@@ -8,6 +8,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "debug_config.hpp"
+
 // Minimal QMI8658 accel+gyro+tap reader for the M3/M4 debug overlay.
 // Accel/gyro register addresses and init sequence are ported from
 // Waveshare's official Arduino demo for this exact board
@@ -31,10 +33,13 @@
 // files, so this constant deliberately isn't a class member — a plain
 // file-scope constexpr gets its own internal-linkage copy per
 // translation unit, no ODR issue, no need to plumb it through the
-// constructor just to toggle a printf. See main.cpp's
-// kLoopTimingLogEnabled flag-layout note for why this stays independent
-// from that file's own debug flags rather than sharing one.
-constexpr bool kQmi8658DebugLogEnabled = true;
+// constructor just to toggle a printf. Tied to the shared kDebugEnabled
+// (debug_config.hpp, 2026-09-12) alongside sleep_mode.cpp's
+// kSleepDebugLogEnabled and main.cpp's overlay/WoM-latency log; see that
+// header's comment for why this group merges while main.cpp's
+// kAttitudeDebugLogEnabled/kLoopTimingLogEnabled (its own flag-layout
+// note) stay independent.
+constexpr bool kQmi8658DebugLogEnabled = kDebugEnabled;
 
 class Qmi8658 {
 public:
