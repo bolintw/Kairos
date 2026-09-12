@@ -39,7 +39,7 @@ constexpr int32_t kBatteryIconWidthPx = 150;
 constexpr int32_t kBatteryIconHeightPx = 70;
 constexpr int32_t kBatteryIconXPx = (kPanelSizePx - kBatteryIconWidthPx) / 2;
 constexpr int32_t kBatteryIconYPx = (kPanelSizePx - kBatteryIconHeightPx) / 2;
-// "線條大概抓個5粗細" — the outline's own border stroke.
+// "outline stroke thickness around 5" — the outline's own border stroke.
 constexpr int32_t kBatteryBorderWidthPx = 5;
 constexpr int32_t kBatteryCornerRadiusPx = 10;
 // Terminal nub — the small bump on the right edge every battery icon
@@ -111,7 +111,8 @@ GuiManager::GuiManager(LGFX& lcd)
     lv_obj_set_style_text_font(label_, kPrimaryFont, 0);
     lv_obj_set_style_text_align(label_, LV_TEXT_ALIGN_CENTER, 0);
     // -3px (2026-09-12, user's own low-battery "Low"/"Battery" screen
-    // feedback — "兩行的字體可以稍微接近一點") — the two labels' line_height
+    // feedback — "the two lines' text could sit a bit closer together") —
+    // the two labels' line_height
     // boxes were already stacked flush with zero gap between them, but
     // each font's line_height includes real leading/padding above and
     // below its actual glyph ink, so "flush boxes" still reads as a
@@ -203,7 +204,7 @@ GuiManager::GuiManager(LGFX& lcd)
     // kRingTickRadiusPx/kRingTickWidthPx/kRingTickHalfSpanDeg's comment in
     // gui_manager.hpp for the black-cut failure). Once arc_rounded=false
     // (below) fixed the actual shape problem — confirmed on hardware,
-    // "直線的顯示對了" — the color went back to following SetAccentColor()
+    // "the straight line looks right" — the color went back to following SetAccentColor()
     // like ring_/ring_track_ (set there, not here; this initial white is
     // just the pre-first-render default, same pattern as ring_/
     // ring_track_ below).

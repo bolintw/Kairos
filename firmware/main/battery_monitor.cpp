@@ -15,8 +15,9 @@ constexpr adc_channel_t kAdcChannel = ADC_CHANNEL_0;
 constexpr adc_atten_t kAdcAtten = ADC_ATTEN_DB_12;
 constexpr adc_bitwidth_t kAdcBitwidth = ADC_BITWIDTH_DEFAULT;
 
-// hardware_pinout.md: "ADC 量測建議多次取樣平均（電池在負載下電壓會暫時下
-// 降，量測時機影響讀數）". Averaged as raw counts, not as post-conversion
+// hardware_pinout.md: "ADC measurement should average multiple samples —
+// battery voltage dips briefly under load, so measurement timing affects
+// the reading". Averaged as raw counts, not as post-conversion
 // voltages — equivalent for a near-linear calibration curve and only
 // needs one adc_cali_raw_to_voltage() call instead of kNumSamples of them.
 constexpr int kNumSamples = 32;
@@ -47,8 +48,9 @@ constexpr float kDividerRatio = 3.114f;
 // hardware_pinout.md's own naive formula (assumes an ideal 3.3V Vref and
 // a full-scale 12-bit/4095 count), less accurate than the calibrated
 // curve-fitting path but a reasonable baseline; that doc's own note
-// ("必要時可用 adc_cali 校正 API 取代線性公式") frames the linear formula
-// as the starting point this upgrades from, not the other way round.
+// ("use the adc_cali calibration API in place of the linear formula if
+// needed") frames the linear formula as the starting point this upgrades
+// from, not the other way round.
 constexpr float kFallbackVrefMv = 3300.0f;
 constexpr float kFallbackMaxCount = 4095.0f;
 }  // namespace

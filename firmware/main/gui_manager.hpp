@@ -75,8 +75,8 @@ constexpr int32_t kRingWidthPx = 7;
 constexpr uint8_t kRingTrackOpa = 70;  // ~27% of full — starting guess
 // Tick mark: a short straight radial line from 12 o'clock in toward the
 // center, at the countdown's current moving boundary — confirmed correct
-// on real hardware 2026-09-11 ("直線的顯示對了") after two false starts the
-// same day: first a black "cut into the ring" (invisible — the panel
+// on real hardware 2026-09-11 ("the straight line looks right") after two
+// false starts the same day: first a black "cut into the ring" (invisible — the panel
 // background is already black, main.cpp, so painting black over it, most
 // of the notch's own footprint, is a no-op), then a fixed-white line
 // (visible and correctly shaped, but the user wanted it tinted like the
@@ -95,7 +95,7 @@ constexpr uint8_t kRingTrackOpa = 70;  // ~27% of full — starting guess
 // kRingTickHalfSpanDeg controls the tick's *tangential* extent (its own
 // visual thickness) at that radius — originally derived algebraically
 // from kRingWidthPx so the two would come out numerically equal
-// ("線條粗度跟外圈相等"), but on real hardware the tick still read visibly
+// ("line thickness should match the outer ring"), but on real hardware the tick still read visibly
 // thinner than the ring at that equal value (7px each) — same math, but
 // this is a narrow-angular-span arc segment rather than the ring's own
 // full sweep, and apparently reads thinner regardless of the area being
