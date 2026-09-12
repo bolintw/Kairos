@@ -15,6 +15,21 @@ hardware and authored primarily by the agent is committed under
 `Claude Sonnet 5 <noreply@anthropic.com>`, so that history is easy to
 filter and read back later (`git log --author="Claude Sonnet 5"`).
 
+## Demo
+
+<!--
+  GIF slots — drop files into docs/media/ with these names and uncomment
+  the corresponding line. Suggested shots:
+    - flip.gif           Rotating the device between faces (A/B/C/D)
+    - tap.gif            Tap to start/pause
+    - charge.gif         Opening the enclosure / plugging in USB-C to charge
+    - battery-check.gif  The pick-up-and-hold battery-check gesture
+-->
+<!-- ![Flip to switch faces](docs/media/flip.gif) -->
+<!-- ![Tap to start/pause](docs/media/tap.gif) -->
+<!-- ![Charging](docs/media/charge.gif) -->
+<!-- ![Battery-check gesture](docs/media/battery-check.gif) -->
+
 ## Hardware
 
 - [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/esp32-s3-lcd-1.28.htm) — round 240x240 GC9A01A SPI display, QMI8658 6-axis IMU, ESP32-S3. ([Wiki](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28))
@@ -46,13 +61,18 @@ idf.py -p <PORT> flash monitor
 
 ## Status
 
-Actively developed and now assembled in an enclosure, running on battery.
-Current focus is power budget work toward deep sleep — active current
-draw is measured (tens of mA range, dominated by a fixed CPU/display
-baseline rather than the backlight), and the wake path is designed around
-the IMU's native Wake-on-Motion mode rather than software polling. See the
-milestone list and design notes inline in the source (`firmware/main/*.hpp`
-design comments carry a lot of the "why", not just the "what").
+Actively developed, assembled in a 3D-printed enclosure, and running
+day-to-day on battery. Idle power management is done: real light sleep
+(~0.8-0.9mA, down from ~70-90mA active) woken by the IMU's native
+Wake-on-Motion mode rather than software polling, with a double-tap
+gesture to confirm an intentional wake. Battery voltage is sensed via ADC
+and backs a two-stage low-battery safety net — a forced warning screen
+first, then a genuine deep-sleep/reboot below a critical threshold, with
+hysteresis tuned against a real charging-induced voltage jump. Current
+focus is retuning tap-gesture sensitivity now that the enclosure has
+changed how vibration reaches the IMU. See the milestone list and design
+notes inline in the source (`firmware/main/*.hpp` design comments carry a
+lot of the "why", not just the "what").
 
 ## License
 
