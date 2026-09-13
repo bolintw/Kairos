@@ -1,5 +1,9 @@
 # Kairos
 
+<p align="center">
+  <img src="docs/media/thumbnail.jpg" alt="Kairos on a desk" width="480">
+</p>
+
 A gravity-triggered desktop Pomodoro / countdown timer. No buttons for the
 core interaction — flip the device to a different face to switch what it's
 timing, tap it to start or pause. Built on a Waveshare ESP32-S3-LCD-1.28
