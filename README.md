@@ -88,7 +88,48 @@ runs considerably longer than this.
 
 ## Assembly
 
-To be continued.
+Printable files: [Kairos — Gravity Timer on MakerWorld](https://makerworld.com/zh-tw/models/3299098-kairos-gravity-timer-homemade-pomodoro-cube#profileId-3744041).
+
+What you'll need, beyond the printed front cover, back cover, and button:
+
+- 4× M3 × 4mm heat-set threaded inserts
+- 4× M3 × 5mm countersunk (flat-head) screws
+- 4× strong magnets, 8mm diameter × 2mm thick
+
+Steps:
+
+1. Print the parts. Pause the print at the marked layer(s) to embed the
+   magnets, then resume — printing everything in one job means two pauses
+   in total.
+2. Heat-set the four threaded inserts into the printed front cover with a
+   soldering iron.
+3. Connect the battery cable to the screen, then set the screen onto the
+   front cover.
+
+   <img src="docs/media/step3.jpg" alt="Screen connected and seated on the front cover" width="400">
+
+4. Fit the printed button into its slot in the back cover. Flip it over
+   onto the screen — the alignment tabs on either side capture the
+   pin-header socket — and fasten with the four countersunk screws. Be
+   careful the button doesn't fall out of place; if it helps, flip the
+   screen/front-cover assembly over and lower it onto the back cover
+   instead.
+
+   <img src="docs/media/step4.jpg" alt="Printed button seated in the back cover" width="400">
+
+5. Fit a battery inside the enclosure — double-sided tape works well to
+   hold it in place. Use the largest capacity that still fits.
+
+   <img src="docs/media/step5.jpg" alt="Battery fitted inside the enclosure" width="400">
+
+6. Connect the battery, then close the front cover, aligning it to the
+   magnets.
+
+   <img src="docs/media/step6.jpg" alt="Screen module, body, and front cover ready to close up" width="400">
+7. Once the screen looks correct, open the front cover, press and hold
+   the calibration button, close the front cover again, and follow the
+   on-screen prompts to calibrate.
+8. Set it on the stand — enjoy!
 
 ## Building the Firmware
 
