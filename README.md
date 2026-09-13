@@ -19,21 +19,6 @@ hardware and authored primarily by the agent is committed under
 `Claude Sonnet 5 <noreply@anthropic.com>`, so that history is easy to
 filter and read back later (`git log --author="Claude Sonnet 5"`).
 
-## Demo
-
-<!--
-  GIF slots — drop files into docs/media/ with these names and uncomment
-  the corresponding line. Suggested shots:
-    - flip.gif           Rotating the device between faces (A/B/C/D)
-    - tap.gif            Tap to start/pause
-    - charge.gif         Opening the enclosure / plugging in USB-C to charge
-    - battery-check.gif  The pick-up-and-hold battery-check gesture
--->
-<!-- ![Flip to switch faces](docs/media/flip.gif) -->
-<!-- ![Tap to start/pause](docs/media/tap.gif) -->
-<!-- ![Charging](docs/media/charge.gif) -->
-<!-- ![Battery-check gesture](docs/media/battery-check.gif) -->
-
 ## Faces
 
 The device has no fixed "up" — the screen always faces you, and you rotate
@@ -60,12 +45,21 @@ timer underneath keeps running the whole time.
 
 ## Controls
 
-| Gesture | Action |
-|---|---|
-| Single tap | Start / pause whichever face is currently showing |
-| Flip | Rotate to a different face to switch what's being timed |
-| Double tap | Wakes the screen from idle sleep (a deliberate two-tap gesture, so an incidental bump won't wake it by accident) |
-| Hold BOOT (~3s) | Enters calibration mode, while the device is already running |
+**Single tap** — start or pause whichever face is currently showing.
+
+![Tap to start/pause](docs/media/tap.gif)
+
+**Flip** — rotate to a different face to switch what's being timed.
+
+![Flip to switch faces](docs/media/flip.gif)
+
+**Double tap** — wakes the screen from idle sleep, a deliberate two-tap
+gesture so an incidental bump won't wake it by accident.
+
+![Double tap to wake from sleep](docs/media/double_tap.gif)
+
+**Hold BOOT (~3s)** — enters calibration mode, while the device is already
+running.
 
 ## Hardware
 
