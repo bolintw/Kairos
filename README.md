@@ -86,6 +86,8 @@ power draw): **10 hours 10 minutes** before the low-battery warning
 triggered. Day-to-day use, dominated by light sleep between interactions,
 runs considerably longer than this.
 
+<img src="docs/media/battery-life.png" alt="Battery voltage vs. time over the 10h10m endurance test" width="500">
+
 ## Assembly
 
 Printable files: [Kairos — Gravity Timer on MakerWorld](https://makerworld.com/zh-tw/models/3299098-kairos-gravity-timer-homemade-pomodoro-cube#profileId-3744041).
